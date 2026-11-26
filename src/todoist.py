@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import json
 import uuid
-from datetime import UTC, datetime
 from typing import Any
 
 import httpx
@@ -42,11 +41,11 @@ def _parse_task_summary(raw: dict[str, Any], project_name: str | None = None) ->
     due = raw.get("due") or {}
     return TaskSummary(
         id=str(raw["id"]),
-        content=str(raw.get("content", "")),
-        project_id=str(raw.get("project_id", "")),
+        content=str(raw.get("content") or ""),
+        project_id=str(raw.get("project_id") or ""),
         project_name=project_name,
-        labels=[str(lbl) for lbl in raw.get("labels", [])],
-        priority=int(raw.get("priority", 1)),
+        labels=[str(lbl) for lbl in (raw.get("labels") or [])],
+        priority=int(raw.get("priority") or 1),
         due_date=due.get("date") if isinstance(due, dict) else None,
         due_string=due.get("string") if isinstance(due, dict) else None,
         is_recurring=bool(due.get("is_recurring", False)) if isinstance(due, dict) else False,
@@ -84,10 +83,16 @@ class TodoistClient:
 
     def update_projects_cache(self, projects: list[dict[str, Any]]) -> None:
         for proj in projects:
-            if proj.get("is_deleted") or proj.get("is_archived"):
-                continue
             pid = str(proj["id"])
+            old_name = self._id_to_name.get(pid)
+            if proj.get("is_deleted") or proj.get("is_archived"):
+                self._id_to_name.pop(pid, None)
+                if old_name and self._name_to_id.get(old_name) == pid:
+                    self._name_to_id.pop(old_name, None)
+                continue
             name = str(proj["name"])
+            if old_name and old_name != name and self._name_to_id.get(old_name) == pid:
+                self._name_to_id.pop(old_name, None)
             self._name_to_id[name] = pid
             self._id_to_name[pid] = name
 
@@ -103,10 +108,7 @@ class TodoistClient:
             resp = await self._client.get("/projects", params=params)
             resp.raise_for_status()
             payload = resp.json()
-            if isinstance(payload, list):
-                projects.extend(payload)
-                break
-            projects.extend(payload.get("results", []))
+            projects.extend(payload.get("results") or [])
             cursor = payload.get("next_cursor")
             if not cursor:
                 break
@@ -145,11 +147,10 @@ class TodoistClient:
             resp = await self._client.get("/tasks", params=params)
             resp.raise_for_status()
             payload = resp.json()
-            raw_items = payload if isinstance(payload, list) else payload.get("results", [])
-            for raw in raw_items:
-                pid = str(raw.get("project_id", ""))
+            for raw in payload.get("results") or []:
+                pid = str(raw.get("project_id") or "")
                 tasks.append(_parse_task_summary(raw, self.get_project_name(pid)))
-            cursor = None if isinstance(payload, list) else payload.get("next_cursor")
+            cursor = payload.get("next_cursor")
             if not cursor:
                 break
         return tasks
@@ -168,7 +169,7 @@ class TodoistClient:
         if not items:
             return []
         await self.ensure_projects_loaded()
-        day_key = idempotency_key or datetime.now(UTC).strftime("%Y-%m-%d")
+        batch_key = idempotency_key or str(uuid.uuid4())
 
         commands: list[dict[str, Any]] = []
         temp_meta: list[tuple[str, CaptureTaskInput]] = []
@@ -186,10 +187,10 @@ class TodoistClient:
                 args["description"] = item.description
 
             cmd_uuid = _deterministic_command_uuid(
-                {"op": "item_add", "idx": idx, "key": day_key, "args": args}
+                {"op": "item_add", "idx": idx, "key": batch_key, "args": args}
             )
             temp_id = _deterministic_command_uuid(
-                {"op": "temp_id", "idx": idx, "key": day_key, "args": args}
+                {"op": "temp_id", "idx": idx, "key": batch_key, "args": args}
             )
             commands.append(
                 {
@@ -312,7 +313,7 @@ class TodoistClient:
             payload = resp.json()
             page_items = payload.get("items")
             if page_items is None:
-                page_items = payload.get("results", [])
+                page_items = payload.get("results") or []
             items.extend(page_items)
             cursor = payload.get("next_cursor")
             if not cursor:

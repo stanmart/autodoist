@@ -24,6 +24,19 @@ def _parse_iso_utc(raw: str) -> datetime:
     return parsed.astimezone(UTC)
 
 
+async def _resolve_project_name(
+    todoist: TodoistClient,
+    project_id: str,
+    refreshed: list[bool],
+) -> str | None:
+    name = todoist.get_project_name(project_id)
+    if name is None and not refreshed[0]:
+        await todoist.ensure_projects_loaded(force_refresh=True)
+        refreshed[0] = True
+        name = todoist.get_project_name(project_id)
+    return name
+
+
 async def run_sync(
     db: Database,
     todoist: TodoistClient,
@@ -39,19 +52,21 @@ async def run_sync(
     now = datetime.now(UTC)
     now_iso = _iso_utc(now)
     inserted = 0
+    refreshed_projects = [sync_token == "*"]
 
-    for item in sync_data.get("items", []):
+    for item in sync_data.get("items") or []:
         if item.get("is_deleted") or not item.get("checked"):
             continue
-        project_name = todoist.get_project_name(str(item.get("project_id", "")))
+        project_id = str(item.get("project_id") or "")
+        project_name = await _resolve_project_name(todoist, project_id, refreshed_projects)
         if project_name not in allowed_set:
             continue
         completed_at = item.get("completed_at") or now_iso
         was_inserted = db.record_completion(
             todoist_task_id=str(item["id"]),
-            content=str(item.get("content", "")),
+            content=str(item.get("content") or ""),
             project_name=project_name,
-            labels=[str(lbl) for lbl in item.get("labels", [])],
+            labels=[str(lbl) for lbl in (item.get("labels") or [])],
             completed_at=completed_at,
             source="todoist_sync",
         )
@@ -59,11 +74,11 @@ async def run_sync(
             inserted += 1
 
     # Best-effort completed-tasks pull (captures recurring completions when supported by plan)
-    seven_days_ago = now - timedelta(days=7)
+    lookback_limit = now - timedelta(days=90)
     if last_synced_at:
-        since_dt = max(_parse_iso_utc(last_synced_at) - timedelta(hours=1), seven_days_ago)
+        since_dt = max(_parse_iso_utc(last_synced_at) - timedelta(hours=1), lookback_limit)
     else:
-        since_dt = seven_days_ago
+        since_dt = now - timedelta(days=7)
 
     completed_endpoint_ok = True
     try:
@@ -83,26 +98,28 @@ async def run_sync(
         task_id = item.get("task_id") or item.get("id")
         if not task_id:
             continue
-        project_name = todoist.get_project_name(str(item.get("project_id", "")))
+        project_id = str(item.get("project_id") or "")
+        project_name = await _resolve_project_name(todoist, project_id, refreshed_projects)
         if project_name not in allowed_set:
             continue
         completed_at = item.get("completed_at") or now_iso
         was_inserted = db.record_completion(
             todoist_task_id=str(task_id),
-            content=str(item.get("content", "")),
+            content=str(item.get("content") or ""),
             project_name=project_name,
-            labels=[str(lbl) for lbl in item.get("labels", [])],
+            labels=[str(lbl) for lbl in (item.get("labels") or [])],
             completed_at=completed_at,
             source="todoist_sync",
         )
         if was_inserted:
             inserted += 1
 
-    new_token = str(sync_data.get("sync_token") or sync_token)
+    raw_new_token = sync_data.get("sync_token")
+    new_token = str(raw_new_token) if raw_new_token else sync_token
     db.update_sync_state(new_token, now)
 
     return {
         "inserted_completions": inserted,
-        "sync_token_updated": new_token != sync_token or sync_token == "*",
+        "sync_token_updated": bool(raw_new_token) and str(raw_new_token) != sync_token,
         "completed_endpoint_ok": completed_endpoint_ok,
     }

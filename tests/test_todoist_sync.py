@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 import httpx
@@ -10,6 +11,10 @@ import respx
 from src.db import Database
 from src.sync_worker import run_sync
 from src.todoist import TODOIST_API_V1_BASE, CaptureTaskInput, TodoistAPIError, TodoistClient
+
+
+def _iso(dt: datetime) -> str:
+    return dt.astimezone(UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
 @respx.mock
@@ -56,7 +61,7 @@ async def test_get_active_tasks_paginates_and_strips_metadata() -> None:
                             "id": "t2",
                             "content": "Water plants",
                             "project_id": "p1",
-                            "labels": [],
+                            "labels": None,
                             "priority": 1,
                             "due": None,
                         }
@@ -77,10 +82,11 @@ async def test_get_active_tasks_paginates_and_strips_metadata() -> None:
     assert tasks[0].project_name == "Personal"
     assert tasks[0].due_date == "2026-11-27"
     assert tasks[1].due_date is None
+    assert tasks[1].labels == []
 
 
 @respx.mock
-async def test_batch_add_tasks_uses_deterministic_uuids() -> None:
+async def test_batch_add_tasks_idempotency_and_fresh_default_uuids() -> None:
     respx.get(f"{TODOIST_API_V1_BASE}/projects").mock(
         return_value=httpx.Response(
             200,
@@ -113,18 +119,25 @@ async def test_batch_add_tasks_uses_deterministic_uuids() -> None:
 
     client = TodoistClient("test-token")
     try:
-        res1 = await client.batch_add_tasks(items, idempotency_key="2026-11-26")
-        res2 = await client.batch_add_tasks(items, idempotency_key="2026-11-26")
+        res1 = await client.batch_add_tasks(items, idempotency_key="retry-1")
+        res2 = await client.batch_add_tasks(items, idempotency_key="retry-1")
+        await client.batch_add_tasks(items)
+        await client.batch_add_tasks(items)
     finally:
         await client.aclose()
 
     assert res1 == [{"id": "real-0", "content": "Buy diapers", "project": "Household"}]
     assert res2 == res1
 
-    cmd1 = json.loads(sync_route.calls[0].request.content)["commands"][0]
-    cmd2 = json.loads(sync_route.calls[1].request.content)["commands"][0]
-    assert cmd1["uuid"] == cmd2["uuid"]
-    assert cmd1["temp_id"] == cmd2["temp_id"]
+    cmd_key1 = json.loads(sync_route.calls[0].request.content)["commands"][0]
+    cmd_key2 = json.loads(sync_route.calls[1].request.content)["commands"][0]
+    assert cmd_key1["uuid"] == cmd_key2["uuid"]
+    assert cmd_key1["temp_id"] == cmd_key2["temp_id"]
+
+    # Without explicit idempotency_key, separate calls generate unique UUIDs
+    cmd_fresh1 = json.loads(sync_route.calls[2].request.content)["commands"][0]
+    cmd_fresh2 = json.loads(sync_route.calls[3].request.content)["commands"][0]
+    assert cmd_fresh1["uuid"] != cmd_fresh2["uuid"]
 
 
 @respx.mock
@@ -206,6 +219,7 @@ async def test_batch_add_raises_on_sync_command_error() -> None:
 async def test_run_sync_ingests_items_and_handles_403_on_completed_endpoint(
     tmp_path: Path,
 ) -> None:
+    now = datetime.now(UTC)
     db = Database(tmp_path / "sync.db")
     db.init_db()
 
@@ -226,7 +240,7 @@ async def test_run_sync_ingests_items_and_handles_403_on_completed_endpoint(
                         "labels": ["home"],
                         "checked": True,
                         "is_deleted": False,
-                        "completed_at": "2026-11-26T12:00:00Z",
+                        "completed_at": _iso(now - timedelta(minutes=10)),
                     },
                     {
                         "id": "102",
@@ -234,7 +248,7 @@ async def test_run_sync_ingests_items_and_handles_403_on_completed_endpoint(
                         "project_id": "p9",
                         "checked": True,
                         "is_deleted": False,
-                        "completed_at": "2026-11-26T12:05:00Z",
+                        "completed_at": _iso(now - timedelta(minutes=5)),
                     },
                     {
                         "id": "103",
@@ -269,10 +283,13 @@ async def test_run_sync_ingests_items_and_handles_403_on_completed_endpoint(
 
 
 @respx.mock
-async def test_run_sync_ingests_recurring_completions_and_dedups(tmp_path: Path) -> None:
+async def test_run_sync_paginates_completed_tasks_and_preserves_token_on_500(
+    tmp_path: Path,
+) -> None:
+    now = datetime.now(UTC)
     db = Database(tmp_path / "sync_rec.db")
     db.init_db()
-    db.update_sync_state("tok-1", "2026-11-26T10:00:00Z")
+    db.update_sync_state("tok-1", _iso(now - timedelta(hours=2)))
 
     respx.get(f"{TODOIST_API_V1_BASE}/projects").mock(
         return_value=httpx.Response(
@@ -292,42 +309,61 @@ async def test_run_sync_ingests_recurring_completions_and_dedups(tmp_path: Path)
                         "project_id": "p2",
                         "checked": True,
                         "is_deleted": False,
-                        "completed_at": "2026-11-26T11:00:00Z",
+                        "completed_at": _iso(now - timedelta(minutes=30)),
                     }
                 ],
             },
         )
     )
-    respx.get(f"{TODOIST_API_V1_BASE}/tasks/completed/by_completion_date").mock(
-        return_value=httpx.Response(
-            200,
-            json={
-                "items": [
-                    {
-                        "task_id": "201",
-                        "content": "Empty bins",
-                        "project_id": "p2",
-                        "completed_at": "2026-11-26T11:00:00Z",
-                    },
-                    {
-                        "task_id": "202",
-                        "content": "Water plants",
-                        "project_id": "p2",
-                        "completed_at": "2026-11-26T11:30:00Z",
-                    },
-                ],
-                "next_cursor": None,
-            },
-        )
+    completed_route = respx.get(
+        f"{TODOIST_API_V1_BASE}/tasks/completed/by_completion_date"
+    ).mock(
+        side_effect=[
+            httpx.Response(
+                200,
+                json={
+                    "items": [
+                        {
+                            "task_id": "201",
+                            "content": "Empty bins",
+                            "project_id": "p2",
+                            "completed_at": _iso(now - timedelta(minutes=30)),
+                        }
+                    ],
+                    "next_cursor": "page-2",
+                },
+            ),
+            httpx.Response(
+                200,
+                json={
+                    "items": [
+                        {
+                            "task_id": "202",
+                            "content": "Water plants",
+                            "project_id": "p2",
+                            "completed_at": _iso(now - timedelta(minutes=15)),
+                        }
+                    ],
+                    "next_cursor": None,
+                },
+            ),
+            httpx.Response(500, json={"error": "Server error"}),
+        ]
     )
 
     client = TodoistClient("test-token")
     try:
         summary = await run_sync(db, client, ["Inbox", "Personal", "Household"])
+        assert summary["inserted_completions"] == 2
+        assert summary["completed_endpoint_ok"] is True
+        assert db.get_sync_state()[0] == "tok-2"
+        assert len(db.get_completion_history(days=90)) == 2
+
+        # On 500 error, sync_token must NOT advance
+        with pytest.raises(httpx.HTTPStatusError):
+            await run_sync(db, client, ["Inbox", "Personal", "Household"])
+        assert db.get_sync_state()[0] == "tok-2"
     finally:
         await client.aclose()
 
-    assert summary["inserted_completions"] == 2
-    assert summary["completed_endpoint_ok"] is True
-    assert db.get_sync_state()[0] == "tok-2"
-    assert len(db.get_completion_history(days=90)) == 2
+    assert completed_route.call_count == 3
