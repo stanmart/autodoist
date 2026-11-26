@@ -97,7 +97,7 @@ CREATE INDEX idx_completion_log_completed_at ON completion_log(completed_at);
 ```
 
 - When `todoist_sync` receives a completion for a task already logged via `mcp_complete` within `±60s`, it reconciles that row in-place to Todoist's authoritative server timestamp and `source='todoist_sync'`.
-- Synced items missing a Todoist `completed_at` timestamp are skipped rather than stamped with container time.
+- Synced items missing a Todoist `completed_at` timestamp log a warning and fall back to sync time (`timestamp_estimated=True`), and are skipped if that `todoist_task_id` already has a row in `completion_log`.
 
 ---
 
