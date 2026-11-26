@@ -135,9 +135,12 @@ async def sync_loop(
     interval_seconds: float,
 ) -> None:
     """Run incremental sync immediately and then periodically until cancelled."""
+    if interval_seconds <= 0:
+        raise ValueError("interval_seconds must be positive")
+    projects = tuple(allowed_projects)
     while True:
         try:
-            summary = await run_sync(db, todoist, allowed_projects)
+            summary = await run_sync(db, todoist, projects)
             logger.info("Periodic sync completed: %s", summary)
         except asyncio.CancelledError:
             raise

@@ -438,8 +438,7 @@ async def test_complete_task_and_history_project_isolation(tmp_path: Path) -> No
     assert close_route.called
 
 
-@respx.mock
-def test_http_jwt_authz_discovery_and_internal_sync_secret(tmp_path: Path) -> None:
+def test_http_jwt_authz_discovery_and_removed_internal_sync(tmp_path: Path) -> None:
     private_key, public_pem = _generate_rsa_keypair()
     cfg, env = _make_config(
         tmp_path,
@@ -452,18 +451,6 @@ def test_http_jwt_authz_discovery_and_internal_sync_secret(tmp_path: Path) -> No
         issuer="https://id.example.com",
         audience="https://mcp.example.com",
         algorithm="RS256",
-    )
-
-    respx.post(f"{TODOIST_API_V1_BASE}/sync").mock(
-        return_value=httpx.Response(200, json={"sync_token": "t-1", "items": [], "projects": []})
-    )
-    respx.get(f"{TODOIST_API_V1_BASE}/projects").mock(
-        return_value=httpx.Response(
-            200, json={"results": [{"id": "p1", "name": "Personal"}], "next_cursor": None}
-        )
-    )
-    respx.get(f"{TODOIST_API_V1_BASE}/tasks/completed/by_completion_date").mock(
-        return_value=httpx.Response(200, json={"items": [], "next_cursor": None})
     )
 
     mcp = create_server(cfg, env, token_verifier=verifier)

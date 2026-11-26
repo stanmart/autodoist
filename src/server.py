@@ -187,12 +187,14 @@ def create_server(
         try:
             yield
         finally:
-            if sync_task is not None:
-                sync_task.cancel()
-                with suppress(asyncio.CancelledError):
-                    await sync_task
-            if owns_todoist:
-                await todoist_client.aclose()
+            try:
+                if sync_task is not None:
+                    sync_task.cancel()
+                    with suppress(asyncio.CancelledError):
+                        await sync_task
+            finally:
+                if owns_todoist:
+                    await todoist_client.aclose()
 
     mcp = FastMCP(
         name="autodoist",
