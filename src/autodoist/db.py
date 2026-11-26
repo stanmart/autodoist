@@ -9,6 +9,8 @@ from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Literal
 
+from autodoist.models import CompletionHistoryItem
+
 CompletionSource = Literal["todoist_sync", "post_hoc_log", "mcp_complete"]
 
 SCHEMA_SQL = """
@@ -188,7 +190,7 @@ class Database:
         days: int = 90,
         project: str | None = None,
         allowed_projects: Iterable[str] | None = None,
-    ) -> list[dict[str, str]]:
+    ) -> list[CompletionHistoryItem]:
         if not (1 <= days <= 365):
             raise ValueError("days must be between 1 and 365")
         since = normalize_timestamp(datetime.now(UTC) - timedelta(days=days))
@@ -212,10 +214,10 @@ class Database:
         with self._connect() as conn:
             rows = conn.execute(query, params).fetchall()
         return [
-            {
-                "content": str(row["content"]),
-                "project_name": str(row["project_name"]),
-                "completed_at": str(row["completed_at"]),
-            }
+            CompletionHistoryItem(
+                content=str(row["content"]),
+                project_name=str(row["project_name"]),
+                completed_at=str(row["completed_at"]),
+            )
             for row in rows
         ]

@@ -53,7 +53,7 @@ wheels = [
 [[package]]
 name = "autodoist"
 version = "0.1.0"
-source = { virtual = "." }
+source = { editable = "." }
 dependencies = [
     { name = "fastmcp" },
     { name = "httpx" },
@@ -67,6 +67,8 @@ dependencies = [
 
 [package.dev-dependencies]
 dev = [
+    { name = "cryptography" },
+    { name = "pyjwt" },
     { name = "pyrefly" },
     { name = "pytest" },
     { name = "pytest-asyncio" },
@@ -88,6 +90,8 @@ requires-dist = [
 
 [package.metadata.requires-dev]
 dev = [
+    { name = "cryptography", specifier = ">=42.0" },
+    { name = "pyjwt", specifier = ">=2.8" },
     { name = "pyrefly", specifier = ">=0.15" },
     { name = "pytest", specifier = ">=8.0" },
     { name = "pytest-asyncio", specifier = ">=0.25" },

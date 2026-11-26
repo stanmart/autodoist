@@ -1,3 +1,7 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
 [project]
 name = "autodoist"
 version = "0.1.0"
@@ -15,8 +19,14 @@ dependencies = [
     "uvicorn>=0.40",
 ]
 
+[project.scripts]
+autodoist = "autodoist.server:main"
+autodoist-sync = "autodoist.sync_worker:main"
+
 [dependency-groups]
 dev = [
+    "cryptography>=42.0",
+    "pyjwt>=2.8",
     "pyrefly>=0.15",
     "pytest>=8.0",
     "pytest-asyncio>=0.25",
@@ -24,15 +34,12 @@ dev = [
     "ruff>=0.8",
 ]
 
+[tool.hatch.build.targets.wheel]
+packages = ["src/autodoist"]
+
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
 asyncio_default_fixture_loop_scope = "function"
-pythonpath = ["."]
-
-[tool.pyrefly]
-project-includes = ["src", "tests"]
-search-path = ["."]
-python-version = "3.12"
 
 [tool.ruff]
 target-version = "py312"
@@ -40,3 +47,8 @@ line-length = 100
 
 [tool.ruff.lint]
 select = ["E", "F", "I", "UP", "B"]
+
+[tool.pyrefly]
+project-includes = ["src", "tests"]
+search-path = ["src"]
+python-version = "3.12"

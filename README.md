@@ -31,13 +31,13 @@ uv sync
 cp config.example.toml config.toml
 cp .env.example .env
 # Set TODOIST_API_TOKEN and AUTH_DISABLED=true in .env for local testing
-uv run uvicorn src.server:create_app --factory --reload --port 8000
+uv run uvicorn autodoist.server:create_app --factory --reload --port 8000
 ```
 
 Trigger a one-off sync manually:
 
 ```bash
-uv run python -m src.sync_worker
+uv run python -m autodoist.sync_worker
 ```
 
 Run tests, lint, and type-check:
@@ -64,7 +64,7 @@ docker compose up -d
 Incremental sync runs automatically inside the container every `sync.interval_minutes` (default 30 min). To run a manual sync immediately:
 
 ```bash
-docker exec autodoist python -m src.sync_worker
+docker exec autodoist python -m autodoist.sync_worker
 ```
 
 5. In Gemini (**Customize -> Connected Apps -> + Custom -> Cloud MCP**), add `https://your-domain.example/mcp` and complete the OIDC login flow. Once verified, set `jwt_audience` in `config.toml` to the `aud` claim issued by your OIDC provider.

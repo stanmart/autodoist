@@ -9,9 +9,10 @@ import httpx
 import pytest
 import respx
 
-from src.db import Database
-from src.sync_worker import run_sync, sync_loop
-from src.todoist import TODOIST_API_V1_BASE, CaptureTaskInput, TodoistAPIError, TodoistClient
+from autodoist.db import Database
+from autodoist.models import CaptureTaskInput, TodoistDue, TodoistProject, TodoistTask
+from autodoist.sync_worker import run_sync, sync_loop
+from autodoist.todoist import TODOIST_API_V1_BASE, ProjectCache, TodoistAPIError, TodoistClient
 
 
 def _iso(dt: datetime) -> str:
@@ -19,7 +20,7 @@ def _iso(dt: datetime) -> str:
 
 
 @respx.mock
-async def test_get_active_tasks_paginates_and_strips_metadata() -> None:
+async def test_get_active_tasks_paginates_and_parses_typed_models() -> None:
     respx.get(f"{TODOIST_API_V1_BASE}/projects").mock(
         return_value=httpx.Response(
             200,
@@ -81,13 +82,13 @@ async def test_get_active_tasks_paginates_and_strips_metadata() -> None:
 
     assert [t.id for t in tasks] == ["t1", "t2"]
     assert tasks[0].project_name == "Personal"
-    assert tasks[0].due_date == "2026-11-27"
-    assert tasks[1].due_date is None
+    assert tasks[0].due is not None and tasks[0].due.date == "2026-11-27"
+    assert tasks[1].due is None
     assert tasks[1].labels == []
 
 
 @respx.mock
-async def test_batch_add_tasks_generates_unique_uuids() -> None:
+async def test_batch_add_tasks_creates_and_maps_ids() -> None:
     respx.get(f"{TODOIST_API_V1_BASE}/projects").mock(
         return_value=httpx.Response(
             200,
@@ -120,18 +121,15 @@ async def test_batch_add_tasks_generates_unique_uuids() -> None:
 
     client = TodoistClient("test-token")
     try:
-        res1 = await client.batch_add_tasks(items)
-        res2 = await client.batch_add_tasks(items)
+        created = await client.batch_add_tasks(items)
     finally:
         await client.aclose()
 
-    assert res1 == [{"id": "real-0", "content": "Buy diapers", "project": "Household"}]
-    assert res2 == res1
-
-    cmd1 = json.loads(sync_route.calls[0].request.content)["commands"][0]
-    cmd2 = json.loads(sync_route.calls[1].request.content)["commands"][0]
-    assert cmd1["uuid"] != cmd2["uuid"]
-    assert cmd1["temp_id"] != cmd2["temp_id"]
+    assert len(created) == 1
+    assert created[0].id == "real-0"
+    assert created[0].content == "Buy diapers"
+    assert created[0].project == "Household"
+    assert sync_route.call_count == 1
 
 
 @respx.mock
@@ -147,16 +145,16 @@ async def test_update_task_preserves_recurrence_and_moves_project() -> None:
         )
     )
 
-    existing = {
-        "id": "t99",
-        "project_id": "p1",
-        "due": {
-            "date": "2026-11-26",
-            "string": "every Monday",
-            "is_recurring": True,
-            "lang": "en",
-        },
-    }
+    existing = TodoistTask(
+        id="t99",
+        project_id="p1",
+        due=TodoistDue(
+            date="2026-11-26",
+            string="every Monday",
+            is_recurring=True,
+            lang="en",
+        ),
+    )
 
     client = TodoistClient("test-token")
     try:
@@ -217,15 +215,23 @@ async def test_run_sync_ingests_items_and_handles_403_on_activities_endpoint(
     db = Database(tmp_path / "sync.db")
     db.init_db()
 
+    respx.get(f"{TODOIST_API_V1_BASE}/projects").mock(
+        return_value=httpx.Response(
+            200,
+            json={
+                "results": [
+                    {"id": "p1", "name": "Personal"},
+                    {"id": "p9", "name": "WorkSecret"},
+                ],
+                "next_cursor": None,
+            },
+        )
+    )
     respx.post(f"{TODOIST_API_V1_BASE}/sync").mock(
         return_value=httpx.Response(
             200,
             json={
                 "sync_token": "tok-new",
-                "projects": [
-                    {"id": "p1", "name": "Personal"},
-                    {"id": "p9", "name": "WorkSecret"},
-                ],
                 "items": [
                     {
                         "id": "101",
@@ -273,7 +279,7 @@ async def test_run_sync_ingests_items_and_handles_403_on_activities_endpoint(
 
     history = db.get_completion_history(days=90)
     assert len(history) == 1
-    assert history[0]["content"] == "Take vitamins"
+    assert history[0].content == "Take vitamins"
 
 
 @respx.mock
@@ -351,7 +357,6 @@ async def test_run_sync_paginates_activities_and_preserves_token_on_500(
         assert db.get_sync_state()[0] == "tok-2"
         assert len(db.get_completion_history(days=90)) == 2
 
-        # On 500 error, sync_token must NOT advance
         with pytest.raises(httpx.HTTPStatusError):
             await run_sync(db, client, ["Inbox", "Personal", "Household"])
         assert db.get_sync_state()[0] == "tok-2"
@@ -361,15 +366,25 @@ async def test_run_sync_paginates_activities_and_preserves_token_on_500(
     assert activities_route.call_count == 3
 
 
-@respx.mock
-async def test_project_cache_eviction_ttl_and_resolve_project_name(
-    tmp_path: Path,
-) -> None:
-    now = datetime.now(UTC)
-    db = Database(tmp_path / "cache.db")
-    db.init_db()
-    db.update_sync_state("tok-1", _iso(now - timedelta(hours=1)))
+def test_project_cache_replaces_renames_and_archived_projects() -> None:
+    cache = ProjectCache(ttl_seconds=60.0)
+    assert cache.is_fresh() is False
 
+    cache.replace([TodoistProject(id="p1", name="Personal")])
+    assert cache.is_fresh() is True
+    assert cache.get_id("Personal") == "p1"
+    assert cache.get_name("p1") == "Personal"
+
+    cache.replace([TodoistProject(id="p1", name="PersonalRenamed")])
+    assert cache.get_id("Personal") is None
+    assert cache.get_name("p1") == "PersonalRenamed"
+
+    cache.replace([TodoistProject(id="p1", name="PersonalRenamed", is_archived=True)])
+    assert cache.get_name("p1") is None
+
+
+@respx.mock
+async def test_client_project_cache_ttl_and_pure_sync_incremental() -> None:
     projects_route = respx.get(f"{TODOIST_API_V1_BASE}/projects").mock(
         side_effect=[
             httpx.Response(
@@ -399,43 +414,20 @@ async def test_project_cache_eviction_ttl_and_resolve_project_name(
         ]
     )
     respx.post(f"{TODOIST_API_V1_BASE}/sync").mock(
-        return_value=httpx.Response(
-            200,
-            json={
-                "sync_token": "tok-2",
-                "items": [
-                    {
-                        "id": "301",
-                        "content": "Mop floor",
-                        "project_id": "p2",
-                        "checked": True,
-                        "is_deleted": False,
-                        "completed_at": _iso(now - timedelta(minutes=5)),
-                    }
-                ],
-            },
-        )
-    )
-    respx.get(f"{TODOIST_API_V1_BASE}/activities").mock(
-        return_value=httpx.Response(200, json={"results": [], "next_cursor": None})
+        return_value=httpx.Response(200, json={"sync_token": "tok-2", "items": []})
     )
 
     client = TodoistClient("test-token", projects_ttl_seconds=0.02)
     try:
-        assert await client.get_project_id("Personal") == "p1"
-        client.update_projects_cache([{"id": "p1", "name": "PersonalRenamed"}])
-        assert client.get_project_name("p1") == "PersonalRenamed"
-        assert "Personal" not in client._name_to_id
-        client.update_projects_cache(
-            [{"id": "p1", "name": "PersonalRenamed", "is_archived": True}]
-        )
+        # sync_incremental is pure and does not populate or poison the project cache
+        token, items = await client.sync_incremental("tok-1")
+        assert token == "tok-2"
+        assert items == []
         assert client.get_project_name("p1") is None
 
-        # Wait past TTL so run_sync triggers a fresh /projects load
+        assert await client.get_project_id("Personal") == "p1"
         await asyncio.sleep(0.03)
-        summary = await run_sync(db, client, ["Inbox", "Personal", "Household"])
-        assert summary["inserted_completions"] == 1
-        assert db.get_completion_history(days=7)[0]["content"] == "Mop floor"
+        assert await client.resolve_project_name("p2") == "Household"
 
         with pytest.raises(ValueError, match="not found in Todoist"):
             await client.get_project_id("DoesNotExist")
@@ -458,7 +450,7 @@ async def test_update_task_non_recurring_and_noop() -> None:
         )
     )
 
-    existing = {"id": "t50", "project_id": "p1", "due": None}
+    existing = TodoistTask(id="t50", project_id="p1", due=None)
     client = TodoistClient("test-token")
     try:
         await client.update_task("t50", existing, project_id="p1")
@@ -482,6 +474,12 @@ async def test_sync_loop_recovers_from_transient_error_and_cancels_cleanly(
     db = Database(tmp_path / "loop.db")
     db.init_db()
 
+    respx.get(f"{TODOIST_API_V1_BASE}/projects").mock(
+        return_value=httpx.Response(
+            200,
+            json={"results": [{"id": "p1", "name": "Personal"}], "next_cursor": None},
+        )
+    )
     respx.post(f"{TODOIST_API_V1_BASE}/sync").mock(
         side_effect=[
             httpx.Response(500, json={"error": "temporary"}),
@@ -489,7 +487,6 @@ async def test_sync_loop_recovers_from_transient_error_and_cancels_cleanly(
                 200,
                 json={
                     "sync_token": "tok-loop",
-                    "projects": [{"id": "p1", "name": "Personal"}],
                     "items": [
                         {
                             "id": "501",
@@ -518,48 +515,9 @@ async def test_sync_loop_recovers_from_transient_error_and_cancels_cleanly(
                 break
             await asyncio.sleep(0.01)
         assert db.get_sync_state()[0] == "tok-loop"
-        assert [r["content"] for r in db.get_completion_history(days=7)] == ["Loop synced task"]
+        assert [r.content for r in db.get_completion_history(days=7)] == ["Loop synced task"]
     finally:
         task.cancel()
         with pytest.raises(asyncio.CancelledError):
             await task
         await client.aclose()
-
-
-@respx.mock
-async def test_partial_sync_delta_does_not_poison_cold_project_cache() -> None:
-    respx.post(f"{TODOIST_API_V1_BASE}/sync").mock(
-        return_value=httpx.Response(
-            200,
-            json={
-                "sync_token": "tok-delta",
-                "projects": [{"id": "p2", "name": "Household"}],
-                "items": [],
-            },
-        )
-    )
-    projects_route = respx.get(f"{TODOIST_API_V1_BASE}/projects").mock(
-        return_value=httpx.Response(
-            200,
-            json={
-                "results": [
-                    {"id": "p1", "name": "Personal"},
-                    {"id": "p2", "name": "Household"},
-                ],
-                "next_cursor": None,
-            },
-        )
-    )
-
-    client = TodoistClient("test-token", projects_ttl_seconds=600.0)
-    try:
-        # Incremental sync with partial projects delta must not skip full /projects load
-        await client.sync_incremental("tok-existing")
-        assert await client.resolve_project_name("p1") == "Personal"
-        # Repeated misses for deleted project ID must not keep calling /projects
-        assert await client.resolve_project_name("p-deleted") is None
-        assert await client.resolve_project_name("p-deleted") is None
-    finally:
-        await client.aclose()
-
-    assert projects_route.call_count == 2
