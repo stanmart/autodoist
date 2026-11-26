@@ -151,3 +151,56 @@ def test_db_sync_state_and_completion_dedup(tmp_path: Path) -> None:
 
     with pytest.raises(ValueError, match="between 1 and 365"):
         db.get_completion_history(days=0)
+    with pytest.raises(ValueError, match="between 1 and 365"):
+        db.get_completion_history(days=366)
+    with pytest.raises(ValueError):
+        db.record_completion(
+            todoist_task_id="bad-ts",
+            content="Empty ts",
+            project_name="Personal",
+            completed_at="",
+            source="post_hoc_log",
+        )
+
+
+def test_db_stores_multiple_recurring_completions_with_same_task_id(tmp_path: Path) -> None:
+    db = Database(tmp_path / "rec.db")
+    db.init_db()
+    now = datetime.now(UTC)
+
+    assert (
+        db.record_completion(
+            todoist_task_id="rec-1",
+            content="Water plants",
+            project_name="Household",
+            completed_at=now - timedelta(days=7),
+            source="todoist_sync",
+        )
+        is True
+    )
+    assert (
+        db.record_completion(
+            todoist_task_id="rec-1",
+            content="Water plants",
+            project_name="Household",
+            completed_at=now,
+            source="todoist_sync",
+        )
+        is True
+    )
+    assert len(db.get_completion_history(days=30)) == 2
+
+
+def test_auth_audience_list_and_rules_review_label_validation() -> None:
+    auth = AuthConfig(jwt_audience=[" https://mcp.example.com ", "", "client-id"])
+    assert auth.jwt_audience == ["https://mcp.example.com", "client-id"]
+    assert AuthConfig(jwt_audience=["  "]).jwt_audience is None
+
+    with pytest.raises(ValueError, match="review_label"):
+        RulesConfig(
+            allowed_projects=["Personal"],
+            capture_projects=["Personal"],
+            allowed_labels=["errands"],
+            synergy_labels=["errands"],
+            review_label="review",
+        )
