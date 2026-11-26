@@ -10,6 +10,20 @@ def normalize_text(text: str) -> str:
     return re.sub(r"\s+", " ", text.strip().lower())
 
 
+def api_to_app_priority(api_priority: int) -> int:
+    """Convert Todoist API priority (4=p1 highest .. 1=p4 normal) to app scale (1=p1 .. 4=p4)."""
+    if not (1 <= api_priority <= 4):
+        raise ValueError("priority must be between 1 and 4")
+    return 5 - api_priority
+
+
+def app_to_api_priority(app_priority: int) -> int:
+    """Convert app priority (1=p1 highest .. 4=p4 normal) to Todoist API scale (4=p1 .. 1=p4)."""
+    if not (1 <= app_priority <= 4):
+        raise ValueError("priority must be between 1 and 4")
+    return 5 - app_priority
+
+
 class TodoistDue(BaseModel):
     date: str | None = None
     string: str | None = None
@@ -91,7 +105,12 @@ class CaptureItem(BaseModel):
     project: str
     labels: list[str] = Field(default_factory=list)
     due_string: str | None = None
-    priority: int = Field(default=1, ge=1, le=4)
+    priority: int = Field(
+        default=4,
+        ge=1,
+        le=4,
+        description="Todoist priority: 1 (p1, highest) to 4 (p4, normal/default).",
+    )
     notes: str | None = None
 
     @field_validator("content", "project", mode="before")
@@ -127,7 +146,11 @@ class TaskOut(BaseModel):
     content: str
     project: str
     labels: list[str]
-    priority: int
+    priority: int = Field(
+        ge=1,
+        le=4,
+        description="Todoist priority: 1 (p1, highest) to 4 (p4, normal).",
+    )
     due_date: str | None = None
     is_recurring: bool = False
 

@@ -17,6 +17,8 @@ from autodoist.models import (
     SkippedDuplicateOut,
     TaskOut,
     UpdateTaskResult,
+    api_to_app_priority,
+    app_to_api_priority,
     normalize_text,
 )
 from autodoist.todoist import TodoistClient
@@ -94,7 +96,7 @@ class AutodoistService:
                     content=task.content,
                     project=task.project_name,
                     labels=task.labels,
-                    priority=task.priority,
+                    priority=api_to_app_priority(task.priority),
                     due_date=due_date,
                     is_recurring=task.due.is_recurring if task.due is not None else False,
                 )
@@ -102,7 +104,7 @@ class AutodoistService:
 
         for bucket_items in groups.values():
             bucket_items.sort(
-                key=lambda t: (-t.priority, t.due_date or "9999-99-99")
+                key=lambda t: (t.priority, t.due_date or "9999-99-99")
             )
 
         return {k: v for k, v in groups.items() if v}
@@ -159,7 +161,7 @@ class AutodoistService:
                         project=item.project,
                         labels=labels_with_review,
                         due_string=item.due_string,
-                        priority=item.priority,
+                        priority=app_to_api_priority(item.priority),
                         description=item.notes or "",
                     )
                 )
@@ -254,13 +256,14 @@ class AutodoistService:
                 base_labels.append(self.rules.review_label)
             final_labels = base_labels
 
+        api_priority = app_to_api_priority(priority) if priority is not None else None
         target_project_id = await self.todoist.get_project_id(project) if project else None
         await self.todoist.update_task(
             task_id,
             existing,
             new_due_date=new_due_date,
             labels=final_labels,
-            priority=priority,
+            priority=api_priority,
             project_id=target_project_id,
         )
 
