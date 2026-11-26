@@ -264,6 +264,57 @@ def test_db_reconciles_mcp_complete_and_checks_recent_post_hoc(tmp_path: Path) -
         is True
     )
 
+    # Same-second mcp_complete + todoist_sync preserves row and reconciles source
+    assert (
+        db.record_completion(
+            todoist_task_id="rec-same-sec",
+            content="Take pill",
+            project_name="Personal",
+            completed_at=now,
+            source="mcp_complete",
+        )
+        is True
+    )
+    assert (
+        db.record_completion(
+            todoist_task_id="rec-same-sec",
+            content="Take pill",
+            project_name="Personal",
+            completed_at=now,
+            source="todoist_sync",
+        )
+        is False
+    )
+    assert [
+        h.content for h in db.get_completion_history(days=30, project="Personal")
+    ].count("Take pill") == 1
+
+    # Separate todoist_sync row at ts + mcp_complete within +-60s deletes stale mcp_complete
+    db.record_completion(
+        todoist_task_id="rec-pre",
+        content="Pre-existing sync",
+        project_name="Personal",
+        completed_at=now - timedelta(hours=1),
+        source="todoist_sync",
+    )
+    db.record_completion(
+        todoist_task_id="rec-pre",
+        content="Pre-existing sync",
+        project_name="Personal",
+        completed_at=now - timedelta(hours=1, seconds=5),
+        source="mcp_complete",
+    )
+    db.record_completion(
+        todoist_task_id="rec-pre",
+        content="Pre-existing sync",
+        project_name="Personal",
+        completed_at=now - timedelta(hours=1),
+        source="todoist_sync",
+    )
+    assert [
+        h.content for h in db.get_completion_history(days=30, project="Personal")
+    ].count("Pre-existing sync") == 1
+
     # Post-hoc recent duplicate lookup normalizes case/whitespace and respects window
     db.record_completion(
         todoist_task_id=None,

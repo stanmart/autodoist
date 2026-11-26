@@ -142,10 +142,10 @@ class Database:
                         existing_exact = conn.execute(
                             """
                             SELECT 1 FROM completion_log
-                            WHERE todoist_task_id = ? AND completed_at = ?
+                            WHERE todoist_task_id = ? AND completed_at = ? AND id != ?
                             LIMIT 1
                             """,
-                            (rec.todoist_task_id, ts),
+                            (rec.todoist_task_id, ts, mcp_row["id"]),
                         ).fetchone()
                         if existing_exact is not None:
                             conn.execute(
