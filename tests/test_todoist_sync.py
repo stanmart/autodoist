@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import json
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -9,7 +10,7 @@ import pytest
 import respx
 
 from src.db import Database
-from src.sync_worker import run_sync
+from src.sync_worker import run_sync, sync_loop
 from src.todoist import TODOIST_API_V1_BASE, CaptureTaskInput, TodoistAPIError, TodoistClient
 
 
@@ -480,3 +481,55 @@ async def test_update_task_non_recurring_and_noop() -> None:
     cmd = json.loads(sync_route.calls[0].request.content)["commands"][0]
     assert cmd["type"] == "item_update"
     assert cmd["args"]["due"] == {"date": "2026-12-05"}
+
+
+@respx.mock
+async def test_sync_loop_recovers_from_transient_error_and_cancels_cleanly(
+    tmp_path: Path,
+) -> None:
+    now = datetime.now(UTC)
+    db = Database(tmp_path / "loop.db")
+    db.init_db()
+
+    respx.post(f"{TODOIST_API_V1_BASE}/sync").mock(
+        side_effect=[
+            httpx.Response(500, json={"error": "temporary"}),
+            httpx.Response(
+                200,
+                json={
+                    "sync_token": "tok-loop",
+                    "projects": [{"id": "p1", "name": "Personal"}],
+                    "items": [
+                        {
+                            "id": "501",
+                            "content": "Loop synced task",
+                            "project_id": "p1",
+                            "checked": True,
+                            "is_deleted": False,
+                            "completed_at": _iso(now - timedelta(minutes=1)),
+                        }
+                    ],
+                },
+            ),
+        ]
+    )
+    respx.get(f"{TODOIST_API_V1_BASE}/tasks/completed/by_completion_date").mock(
+        return_value=httpx.Response(200, json={"items": [], "next_cursor": None})
+    )
+
+    client = TodoistClient("test-token")
+    task = asyncio.create_task(
+        sync_loop(db, client, ["Personal"], interval_seconds=0.02)
+    )
+    try:
+        for _ in range(50):
+            if db.get_sync_state()[0] == "tok-loop":
+                break
+            await asyncio.sleep(0.01)
+        assert db.get_sync_state()[0] == "tok-loop"
+        assert [r["content"] for r in db.get_completion_history(days=7)] == ["Loop synced task"]
+    finally:
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+        await client.aclose()

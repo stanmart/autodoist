@@ -5,7 +5,14 @@ from pathlib import Path
 
 import pytest
 
-from src.config import AppConfig, AuthConfig, EnvSettings, RulesConfig, validate_runtime_security
+from src.config import (
+    AppConfig,
+    AuthConfig,
+    EnvSettings,
+    RulesConfig,
+    SyncConfig,
+    validate_runtime_security,
+)
 from src.db import Database
 
 
@@ -14,6 +21,7 @@ def test_app_config_loads_default_toml() -> None:
     assert cfg.storage.db_path == "data/autodoist.db"
     assert cfg.auth.oidc_issuer == "https://id.example.com"
     assert cfg.auth.jwt_algorithm == "RS256"
+    assert cfg.sync.interval_minutes == 30
     assert cfg.rules.allowed_projects == ["Inbox", "Personal", "Household"]
     assert cfg.rules.capture_projects == ["Personal", "Household"]
     assert cfg.rules.review_label == "review"
@@ -66,7 +74,7 @@ def test_runtime_security_fails_closed() -> None:
     assert cfg_no_subs.auth.mcp_base_url == "https://mcp.example.com"
     assert cfg_no_subs.auth.oidc_issuer == "https://id.example.com"
 
-    prod_env = EnvSettings(_env_file=None, sync_secret="sync-ok", auth_disabled=False)
+    prod_env = EnvSettings(_env_file=None, auth_disabled=False)
     with pytest.raises(ValueError, match="allowed_user_subs"):
         validate_runtime_security(cfg_no_subs, prod_env)
 
@@ -91,9 +99,8 @@ def test_runtime_security_fails_closed() -> None:
     assert cfg_ok.auth.allowed_user_subs == frozenset({"user-1", "user-2"})
     validate_runtime_security(cfg_ok, prod_env)
 
-    no_secret_env = EnvSettings(_env_file=None, sync_secret="", auth_disabled=False)
-    with pytest.raises(ValueError, match="SYNC_SECRET"):
-        validate_runtime_security(cfg_ok, no_secret_env)
+    with pytest.raises(ValueError):
+        SyncConfig.model_validate_json('{"interval_minutes": -1}')
 
     dev_env = EnvSettings(_env_file=None, auth_disabled=True)
     validate_runtime_security(cfg_no_subs, dev_env)

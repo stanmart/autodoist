@@ -1,9 +1,9 @@
 from __future__ import annotations
 
-import hmac
+import asyncio
 import logging
 import re
-from contextlib import asynccontextmanager
+from contextlib import asynccontextmanager, suppress
 from datetime import UTC, date, datetime
 from typing import Annotated, Any, Literal
 
@@ -21,7 +21,7 @@ from starlette.types import ASGIApp, Receive, Scope, Send
 
 from src.config import AppConfig, EnvSettings, load_config, validate_runtime_security
 from src.db import Database
-from src.sync_worker import run_sync
+from src.sync_worker import sync_loop
 from src.todoist import CaptureTaskInput, TodoistClient
 
 logger = logging.getLogger(__name__)
@@ -172,9 +172,25 @@ def create_server(
 
     @asynccontextmanager
     async def _lifespan(_server: FastMCP) -> Any:
+        sync_task: asyncio.Task[None] | None = None
+        if app_config.sync.interval_minutes > 0 and (
+            todoist is not None or bool(env.todoist_api_token.strip())
+        ):
+            sync_task = asyncio.create_task(
+                sync_loop(
+                    database,
+                    todoist_client,
+                    rules.allowed_projects,
+                    app_config.sync.interval_minutes * 60,
+                )
+            )
         try:
             yield
         finally:
+            if sync_task is not None:
+                sync_task.cancel()
+                with suppress(asyncio.CancelledError):
+                    await sync_task
             if owns_todoist:
                 await todoist_client.aclose()
 
@@ -187,19 +203,6 @@ def create_server(
     @mcp.custom_route("/health", methods=["GET"])
     async def health(_request: Request) -> JSONResponse:
         return JSONResponse({"status": "ok"})
-
-    @mcp.custom_route("/internal/sync", methods=["POST"])
-    async def internal_sync(request: Request) -> JSONResponse:
-        expected = env.sync_secret.strip()
-        if not expected:
-            return JSONResponse({"error": "sync_secret_not_configured"}, status_code=503)
-        provided = request.headers.get("X-Sync-Secret", "")
-        if not provided or not hmac.compare_digest(
-            provided.encode("utf-8"), expected.encode("utf-8")
-        ):
-            return JSONResponse({"error": "forbidden"}, status_code=403)
-        result = await run_sync(database, todoist_client, rules.allowed_projects)
-        return JSONResponse({"status": "ok", **result})
 
     @mcp.tool()
     async def get_tasks_by_synergy(

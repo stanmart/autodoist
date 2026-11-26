@@ -16,12 +16,12 @@ Non-secret settings live in [config.toml](config.toml) (`AUTODOIST_CONFIG` overr
 
 - `[storage]`: `db_path` (default `data/autodoist.db`)
 - `[auth]`: `mcp_base_url`, `oidc_issuer`, optional `oidc_jwks_uri`, `jwt_algorithm` (default `RS256`), optional `jwt_audience`, `allowed_user_subs`
+- `[sync]`: `interval_minutes` (default `30`; `0` disables background sync)
 - `[rules]`: `allowed_projects`, `capture_projects`, `allowed_labels`, `synergy_labels`, `review_label`
 
 Secrets live in `.env` (see [.env.example](.env.example)):
 
 - `TODOIST_API_TOKEN`
-- `SYNC_SECRET`
 - `AUTH_DISABLED=true` (local dev only — never use in production)
 
 ## Local Development
@@ -29,8 +29,14 @@ Secrets live in `.env` (see [.env.example](.env.example)):
 ```bash
 uv sync
 cp .env.example .env
-# Set TODOIST_API_TOKEN, SYNC_SECRET, and AUTH_DISABLED=true in .env for local testing
+# Set TODOIST_API_TOKEN and AUTH_DISABLED=true in .env for local testing
 uv run uvicorn src.server:create_app --factory --reload --port 8000
+```
+
+Trigger a one-off sync manually:
+
+```bash
+uv run python -m src.sync_worker
 ```
 
 Run tests, lint, and type-check:
@@ -43,19 +49,18 @@ uv run pyrefly check
 
 ## Docker Compose Deployment
 
-1. Copy `.env.example` to `.env` and set `TODOIST_API_TOKEN` and `SYNC_SECRET`.
+1. Copy `.env.example` to `.env` and set `TODOIST_API_TOKEN`.
 2. Edit `config.toml` with your `mcp_base_url`, `oidc_issuer` (plus `oidc_jwks_uri` if your provider does not use `/.well-known/jwks.json`), and `allowed_user_subs`.
-3. Start behind an HTTPS reverse proxy (Caddy/Nginx/Traefik) pointing at `127.0.0.1:8000`:
+3. Start behind an HTTPS reverse proxy pointing at `127.0.0.1:8000`:
 
 ```bash
 docker compose up -d
 ```
 
-4. Schedule periodic incremental syncs (every 30–60 minutes) with cron or a systemd timer:
+Incremental sync runs automatically inside the container every `sync.interval_minutes` (default 30 min). To run a manual sync immediately:
 
 ```bash
-curl -fsS -X POST https://your-domain.example/internal/sync \
-  -H "X-Sync-Secret: $SYNC_SECRET"
+docker exec autodoist python -m src.sync_worker
 ```
 
-5. In Gemini (**Customize -> Connected Apps -> + Custom -> Cloud MCP**), add `https://your-domain.example/mcp` and complete the OIDC login flow. Once verified, set `jwt_audience` in `config.toml` to the `aud` claim issued by your OIDC provider.
+4. In Gemini (**Customize -> Connected Apps -> + Custom -> Cloud MCP**), add `https://your-domain.example/mcp` and complete the OIDC login flow. Once verified, set `jwt_audience` in `config.toml` to the `aud` claim issued by your OIDC provider.

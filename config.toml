@@ -16,6 +16,10 @@ oidc_issuer = "https://id.example.com"
 # OIDC `sub` user IDs allowed to access the MCP server
 allowed_user_subs = []
 
+[sync]
+# Periodic background sync interval in minutes (0 disables background sync)
+interval_minutes = 30
+
 [rules]
 allowed_projects = ["Inbox", "Personal", "Household"]
 capture_projects = ["Personal", "Household"]
