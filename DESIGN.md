@@ -107,9 +107,13 @@ CREATE INDEX idx_completion_log_completed_at ON completion_log(completed_at);
 | --- | --- | --- | --- |
 | `get_tasks_by_synergy` | Structured retrieval for daily triage or batching. | `project?`, `label?`, `include_overdue` | Queries active tasks, filters to `allowed_projects`, evaluates overdue dates in `rules.timezone`, groups by `synergy_labels` / `untagged`, and sorts by priority/due date. |
 | `capture_items` | Batch intake for tasks and post-hoc logs. | `items`: list of `{ content, mode, project, labels, due_string?, priority?, notes? }` | Validates `capture_projects` & `allowed_labels`. **Tasks:** skips normalized duplicates against active project tasks, auto-attaches `review_label`, submits batched `/sync item_add`. **Post-hoc:** skips duplicates within-batch and against recent (`300s`) `post_hoc_log` entries, then writes to `completion_log`. |
-| `update_or_reschedule` | Safe edits and recurrence-preserving date moves. | `task_id`, `new_due_date?`, `labels?`, `priority?`, `project?`, `clear_review_flag` | Validates `task_id`, `YYYY-MM-DD`, `allowed_projects`, and `allowed_labels`; preserves `review_label` unless `clear_review_flag=true`; preserves recurrence string on recurring tasks. |
-| `complete_task` | Marks a task done and immediately records it. | `task_id` | Verifies task is in `allowed_projects`, closes via Todoist API, and records `mcp_complete` row (later reconciled on sync). |
+| `update_or_reschedule` | Safe edits and recurrence-preserving date moves. | `task_id`, `new_due_date?`, `labels?`, `priority?`, `project?`, `clear_review_flag` | Validates `task_id`, `YYYY-MM-DD`, `allowed_projects`, and `allowed_labels`; `labels` replaces only allowlisted labels and keeps hand-set ones; preserves `review_label` unless `clear_review_flag=true`; preserves the recurrence string and the time of day (floating or fixed-timezone) when moving a date. |
+| `complete_task` | Marks a task done and immediately records it. | `task_id` | Verifies task is in `allowed_projects`, closes via Todoist API, and records `mcp_complete` row (later reconciled on sync). An already completed task is returned without closing or logging again. |
 | `get_completion_history` | Feeds weekly recurrence audit. | `days` (`1..365`, default `90`), `project?` | Queries `completion_log` scoped to `allowed_projects` and returns compact `(content, project_name, completed_at)` records. |
+
+**Project names are not unique in Todoist.** The allowlist is name-based, so the project cache tracks names shared by several active projects as ambiguous: they never resolve to an ID, tool calls touching them raise an error asking for a rename, and background sync skips them with a warning.
+
+**Batch size.** `/sync` accepts at most 100 commands per request, so `capture_items` batches are split into consecutive requests of up to 100 `item_add` commands.
 
 ---
 

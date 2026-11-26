@@ -122,6 +122,8 @@ def create_server(
     token_verifier: JWTVerifier | None = None,
 ) -> FastMCP:
     validate_runtime_security(app_config, env)
+    if env.auth_disabled:
+        logger.warning("AUTH_DISABLED is set: the MCP server accepts unauthenticated requests")
     if todoist is None:
         validate_todoist_token(env)
 

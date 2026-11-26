@@ -808,3 +808,194 @@ def test_create_server_requires_todoist_token_and_health_checks_db(tmp_path: Pat
         resp = client.get("/health")
         assert resp.status_code == 503
         assert resp.json() == {"status": "unhealthy"}
+
+
+def _mock_projects(projects: list[dict[str, str]]) -> None:
+    respx.get(f"{TODOIST_API_V1_BASE}/projects").mock(
+        return_value=httpx.Response(200, json={"results": projects, "next_cursor": None})
+    )
+
+
+def _mock_task(task: dict[str, Any]) -> None:
+    respx.get(f"{TODOIST_API_V1_BASE}/tasks/{task['id']}").mock(
+        return_value=httpx.Response(200, json=task)
+    )
+
+
+def _mock_sync_ok() -> respx.Route:
+    return respx.post(f"{TODOIST_API_V1_BASE}/sync").mock(
+        side_effect=lambda req: httpx.Response(
+            200,
+            json={"sync_status": {cmd["uuid"]: "ok" for cmd in _parse_sync_commands(req)}},
+        )
+    )
+
+
+@respx.mock
+async def test_duplicate_project_names_fail_closed(tmp_path: Path) -> None:
+    # Todoist allows two projects named "Personal"; a name allowlist cannot tell them apart.
+    _mock_projects(
+        [
+            {"id": "p1", "name": "Personal"},
+            {"id": "p2", "name": "Personal"},
+            {"id": "p3", "name": "Household"},
+        ]
+    )
+    _mock_task({"id": "t-shadow", "content": "Shadow", "project_id": "p2", "labels": []})
+    _mock_task({"id": "t-real", "content": "Real", "project_id": "p1", "labels": []})
+    _mock_task({"id": "t-house", "content": "Mop", "project_id": "p3", "labels": []})
+    tasks_route = respx.get(f"{TODOIST_API_V1_BASE}/tasks").mock(
+        return_value=httpx.Response(
+            200,
+            json={
+                "results": [{"id": "t-house", "content": "Mop", "project_id": "p3"}],
+                "next_cursor": None,
+            },
+        )
+    )
+    close_shadow = respx.post(f"{TODOIST_API_V1_BASE}/tasks/t-shadow/close").mock(
+        return_value=httpx.Response(204)
+    )
+    close_real = respx.post(f"{TODOIST_API_V1_BASE}/tasks/t-real/close").mock(
+        return_value=httpx.Response(204)
+    )
+    close_house = respx.post(f"{TODOIST_API_V1_BASE}/tasks/t-house/close").mock(
+        return_value=httpx.Response(204)
+    )
+    sync_route = _mock_sync_ok()
+
+    cfg, env = _make_config(tmp_path)
+    todoist = TodoistClient("test-token")
+    mcp = create_server(cfg, env, todoist=todoist)
+    ambiguous = "shared by several Todoist projects"
+
+    try:
+        async with Client(mcp) as client:
+            for task_id in ("t-shadow", "t-real"):
+                with pytest.raises(ToolError, match=ambiguous):
+                    await client.call_tool("complete_task", {"task_id": task_id})
+                with pytest.raises(ToolError, match=ambiguous):
+                    await client.call_tool(
+                        "update_or_reschedule", {"task_id": task_id, "priority": 1}
+                    )
+            with pytest.raises(ToolError, match=ambiguous):
+                await client.call_tool("get_tasks_by_synergy", {"project": "Personal"})
+            with pytest.raises(ToolError, match=ambiguous):
+                await client.call_tool(
+                    "capture_items",
+                    {"items": [{"content": "Buy stamps", "project": "Personal"}]},
+                )
+            with pytest.raises(ToolError, match=ambiguous):
+                await client.call_tool(
+                    "update_or_reschedule", {"task_id": "t-house", "project": "Personal"}
+                )
+
+            # Uniquely named projects keep working.
+            listed = await _call_json(client, "get_tasks_by_synergy", {})
+            assert [t["id"] for t in listed["untagged"]] == ["t-house"]
+            done = await _call_json(client, "complete_task", {"task_id": "t-house"})
+            assert done["project"] == "Household"
+    finally:
+        await todoist.aclose()
+
+    assert not close_shadow.called
+    assert not close_real.called
+    assert close_house.called
+    assert not sync_route.called
+    assert tasks_route.called
+
+
+@respx.mock
+async def test_listing_fails_closed_when_a_task_is_in_an_ambiguous_project(
+    tmp_path: Path,
+) -> None:
+    _mock_projects([{"id": "p1", "name": "Personal"}, {"id": "p2", "name": "Personal"}])
+    respx.get(f"{TODOIST_API_V1_BASE}/tasks").mock(
+        return_value=httpx.Response(
+            200,
+            json={
+                "results": [{"id": "t1", "content": "Shadow", "project_id": "p2"}],
+                "next_cursor": None,
+            },
+        )
+    )
+    cfg, env = _make_config(tmp_path)
+    todoist = TodoistClient("test-token")
+    mcp = create_server(cfg, env, todoist=todoist)
+    try:
+        async with Client(mcp) as client:
+            with pytest.raises(ToolError, match="shared by several Todoist projects"):
+                await client.call_tool("get_tasks_by_synergy", {})
+    finally:
+        await todoist.aclose()
+
+
+@respx.mock
+async def test_update_labels_keeps_labels_outside_the_allowlist(tmp_path: Path) -> None:
+    _mock_projects([{"id": "p1", "name": "Personal"}])
+    _mock_task(
+        {
+            "id": "t1",
+            "content": "Call plumber",
+            "project_id": "p1",
+            "labels": ["waiting", "home", "review", "someday"],
+        }
+    )
+    sync_route = _mock_sync_ok()
+    cfg, env = _make_config(tmp_path)
+    todoist = TodoistClient("test-token")
+    mcp = create_server(cfg, env, todoist=todoist)
+
+    try:
+        async with Client(mcp) as client:
+            await client.call_tool(
+                "update_or_reschedule", {"task_id": "t1", "labels": ["errands"]}
+            )
+            await client.call_tool(
+                "update_or_reschedule",
+                {"task_id": "t1", "labels": [], "clear_review_flag": True},
+            )
+    finally:
+        await todoist.aclose()
+
+    # "home" (allowlisted) is replaced; "waiting"/"someday" (hand-set) and review survive.
+    first = _parse_sync_commands(sync_route.calls[0].request)[0]["args"]["labels"]
+    assert first == ["errands", "waiting", "someday", "review"]
+    second = _parse_sync_commands(sync_route.calls[1].request)[0]["args"]["labels"]
+    assert second == ["waiting", "someday"]
+
+
+@respx.mock
+async def test_complete_task_does_not_close_or_log_an_already_completed_task(
+    tmp_path: Path,
+) -> None:
+    _mock_projects([{"id": "p1", "name": "Personal"}])
+    _mock_task(
+        {"id": "t1", "content": "Done before", "project_id": "p1", "checked": True}
+    )
+    close_route = respx.post(f"{TODOIST_API_V1_BASE}/tasks/t1/close").mock(
+        return_value=httpx.Response(204)
+    )
+    cfg, env = _make_config(tmp_path)
+    db = Database(cfg.storage.db_path)
+    todoist = TodoistClient("test-token")
+    mcp = create_server(cfg, env, db=db, todoist=todoist)
+
+    try:
+        async with Client(mcp) as client:
+            res = await _call_json(client, "complete_task", {"task_id": "t1"})
+    finally:
+        await todoist.aclose()
+
+    assert res["completed"] is True
+    assert not close_route.called
+    assert db.get_completion_history(days=7) == []
+
+
+def test_auth_disabled_logs_a_startup_warning(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    cfg, env = _make_config(tmp_path, auth_disabled=True)
+    with caplog.at_level("WARNING", logger="autodoist.server"):
+        create_server(cfg, env, todoist=TodoistClient("test-token"))
+    assert "AUTH_DISABLED" in caplog.text

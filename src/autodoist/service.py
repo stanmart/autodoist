@@ -21,7 +21,7 @@ from autodoist.models import (
     app_to_api_priority,
     normalize_text,
 )
-from autodoist.todoist import TodoistClient
+from autodoist.todoist import AmbiguousProjectError, TodoistClient
 
 _TASK_ID_RE = re.compile(r"[A-Za-z0-9_-]+")
 _ISO_DATE_RE = re.compile(r"\d{4}-\d{2}-\d{2}")
@@ -57,6 +57,22 @@ class AutodoistService:
         self.todoist = todoist
         self._allowed_projects = set(rules.allowed_projects)
         self._capture_projects = set(rules.capture_projects)
+        self._allowed_labels = set(rules.allowed_labels)
+
+    def _require_unambiguous(self, project_name: str) -> None:
+        """Fail closed when an allowlisted name matches several Todoist projects."""
+        if self.todoist.is_ambiguous_project_name(project_name):
+            raise AmbiguousProjectError(project_name)
+
+    async def _require_allowed_task_project(self, task_id: str, project_id: str) -> str:
+        project_name = await self.todoist.resolve_project_name(project_id)
+        if project_name is None or project_name not in self._allowed_projects:
+            raise ValueError(
+                f"Task {task_id!r} belongs to project {project_name!r}, "
+                "which is outside allowed_projects"
+            )
+        self._require_unambiguous(project_name)
+        return project_name
 
     async def get_tasks_by_synergy(
         self,
@@ -83,6 +99,7 @@ class AutodoistService:
         for task in tasks:
             if task.project_name is None or task.project_name not in self._allowed_projects:
                 continue
+            self._require_unambiguous(task.project_name)
             due_date = task.due.date if task.due is not None else None
             if not include_overdue and due_date and due_date < today_str:
                 continue
@@ -235,18 +252,17 @@ class AutodoistService:
         )
 
         existing = await self.todoist.get_task(task_id)
-        current_project = await self.todoist.resolve_project_name(existing.project_id)
-        if current_project not in self._allowed_projects:
-            raise ValueError(
-                f"Task {task_id!r} belongs to project {current_project!r}, "
-                "which is outside allowed_projects"
-            )
+        await self._require_allowed_task_project(task_id, existing.project_id)
 
         final_labels: list[str] | None = None
         if clean_labels is not None or clear_review_flag:
-            base_labels = (
-                list(clean_labels) if clean_labels is not None else list(existing.labels)
-            )
+            if clean_labels is not None:
+                # `labels` replaces the managed labels only; labels outside the allowlist
+                # were set by hand in Todoist and are not ours to remove.
+                unmanaged = [lbl for lbl in existing.labels if lbl not in self._allowed_labels]
+                base_labels = list(dict.fromkeys([*clean_labels, *unmanaged]))
+            else:
+                base_labels = list(existing.labels)
             if clear_review_flag:
                 base_labels = [lbl for lbl in base_labels if lbl != self.rules.review_label]
             elif (
@@ -280,12 +296,16 @@ class AutodoistService:
     async def complete_task(self, task_id: str) -> CompleteTaskResult:
         _validate_task_id(task_id)
         existing = await self.todoist.get_task(task_id)
-        project_name = await self.todoist.resolve_project_name(existing.project_id)
-        if project_name is None or project_name not in self._allowed_projects:
-            raise ValueError(
-                f"Task {task_id!r} belongs to project {project_name!r}, "
-                "which is outside allowed_projects"
-            )
+        project_name = await self._require_allowed_task_project(task_id, existing.project_id)
+        result = CompleteTaskResult(
+            task_id=task_id,
+            content=existing.content,
+            project=project_name,
+            completed=True,
+        )
+        if existing.checked:
+            # Already completed: closing and logging again would duplicate the history row.
+            return result
 
         await self.todoist.close_task(task_id)
         await asyncio.to_thread(
@@ -296,12 +316,7 @@ class AutodoistService:
             labels=existing.labels,
             source="mcp_complete",
         )
-        return CompleteTaskResult(
-            task_id=task_id,
-            content=existing.content,
-            project=project_name,
-            completed=True,
-        )
+        return result
 
     async def get_completion_history(
         self,

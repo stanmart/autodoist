@@ -26,6 +26,13 @@ async def run_sync(
     sync_token, last_synced_at = await asyncio.to_thread(db.get_sync_state)
 
     await todoist.refresh_projects(force=True)
+    ambiguous = sorted(name for name in allowed_set if todoist.is_ambiguous_project_name(name))
+    if ambiguous:
+        logger.warning(
+            "Allowed project names shared by several Todoist projects are skipped: %s",
+            ambiguous,
+        )
+        allowed_set -= set(ambiguous)
     new_token, items = await todoist.sync_incremental(sync_token)
 
     now = datetime.now(UTC)
