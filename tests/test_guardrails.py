@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import time
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 import httpx
@@ -528,3 +529,215 @@ def test_http_jwt_authz_discovery_and_internal_sync_secret(tmp_path: Path) -> No
         ok_sync = client.post("/internal/sync", headers={"X-Sync-Secret": "sync-secret-123"})
         assert ok_sync.status_code == 200
         assert ok_sync.json()["status"] == "ok"
+
+        # Expired and wrong-issuer JWTs return 401
+        expired = jwt.encode(
+            {
+                "sub": "sub-allowed",
+                "iss": "https://id.csigahaz.eu",
+                "aud": "https://mcp.example.com",
+                "iat": now - 600,
+                "exp": now - 60,
+            },
+            private_key,
+            algorithm="RS256",
+        )
+        assert (
+            client.post("/mcp", headers={"Authorization": f"Bearer {expired}"}).status_code == 401
+        )
+        wrong_iss = jwt.encode(
+            {
+                "sub": "sub-allowed",
+                "iss": "https://evil.example.com",
+                "aud": "https://mcp.example.com",
+                "iat": now,
+                "exp": now + 300,
+            },
+            private_key,
+            algorithm="RS256",
+        )
+        assert (
+            client.post("/mcp", headers={"Authorization": f"Bearer {wrong_iss}"}).status_code
+            == 401
+        )
+
+
+def test_internal_sync_returns_503_when_sync_secret_unset_and_handles_non_ascii_secret(
+    tmp_path: Path,
+) -> None:
+    cfg, env = _make_config(tmp_path, auth_disabled=True, sync_secret="")
+    mcp = create_server(cfg, env)
+    app = mcp.http_app(transport="streamable-http")
+    with TestClient(app) as client:
+        resp = client.post("/internal/sync", headers={"X-Sync-Secret": "anything"})
+        assert resp.status_code == 503
+        assert resp.json()["error"] == "sync_secret_not_configured"
+
+    cfg_utf8, env_utf8 = _make_config(tmp_path, auth_disabled=True, sync_secret="secret-é")
+    mcp_utf8 = create_server(cfg_utf8, env_utf8)
+    with TestClient(mcp_utf8.http_app(transport="streamable-http")) as client_utf8:
+        resp_403 = client_utf8.post("/internal/sync", headers={"X-Sync-Secret": "wrong"})
+        assert resp_403.status_code == 403
+
+
+async def test_tool_level_authz_blocks_unauthenticated_context(tmp_path: Path) -> None:
+    cfg, env = _make_config(tmp_path, auth_disabled=False)
+    mcp = create_server(cfg, env)
+    async with Client(mcp) as client:
+        with pytest.raises(ToolError, match="Authentication required"):
+            await client.call_tool("get_completion_history", {"days": 7})
+
+
+@respx.mock
+async def test_synergy_sorting_overdue_filtering_and_error_cases(tmp_path: Path) -> None:
+    today = datetime.now(UTC).date()
+    yesterday = (today - timedelta(days=1)).isoformat()
+    tomorrow = (today + timedelta(days=1)).isoformat()
+    next_week = (today + timedelta(days=7)).isoformat()
+
+    respx.get(f"{TODOIST_API_V1_BASE}/projects").mock(
+        return_value=httpx.Response(
+            200,
+            json={"results": [{"id": "p1", "name": "Personal"}], "next_cursor": None},
+        )
+    )
+    respx.get(f"{TODOIST_API_V1_BASE}/tasks").mock(
+        return_value=httpx.Response(
+            200,
+            json={
+                "results": [
+                    {
+                        "id": "t-overdue",
+                        "content": "Overdue",
+                        "project_id": "p1",
+                        "labels": ["admin"],
+                        "priority": 2,
+                        "due": {"date": yesterday},
+                    },
+                    {
+                        "id": "t-p4-later",
+                        "content": "Low later",
+                        "project_id": "p1",
+                        "labels": ["admin"],
+                        "priority": 1,
+                        "due": {"date": next_week},
+                    },
+                    {
+                        "id": "t-p1-soon",
+                        "content": "Urgent soon",
+                        "project_id": "p1",
+                        "labels": ["admin"],
+                        "priority": 4,
+                        "due": {"date": next_week},
+                    },
+                    {
+                        "id": "t-p1-earlier",
+                        "content": "Urgent earlier",
+                        "project_id": "p1",
+                        "labels": ["admin"],
+                        "priority": 4,
+                        "due": {"date": tomorrow},
+                    },
+                    {
+                        "id": "t-untagged",
+                        "content": "Plain task",
+                        "project_id": "p1",
+                        "labels": [],
+                        "priority": 1,
+                    },
+                ],
+                "next_cursor": None,
+            },
+        )
+    )
+
+    cfg, env = _make_config(tmp_path)
+    todoist = TodoistClient("test-token")
+    mcp = create_server(cfg, env, todoist=todoist)
+
+    try:
+        async with Client(mcp) as client:
+            all_tasks = (await client.call_tool("get_tasks_by_synergy", {})).data
+            assert [t["id"] for t in all_tasks["admin"]] == [
+                "t-p1-earlier",
+                "t-p1-soon",
+                "t-overdue",
+                "t-p4-later",
+            ]
+            assert [t["id"] for t in all_tasks["untagged"]] == ["t-untagged"]
+
+            no_overdue = (
+                await client.call_tool("get_tasks_by_synergy", {"include_overdue": False})
+            ).data
+            assert "t-overdue" not in [t["id"] for t in no_overdue["admin"]]
+
+            with pytest.raises(ToolError, match="not allowed"):
+                await client.call_tool("get_tasks_by_synergy", {"project": "WorkSecret"})
+            with pytest.raises(ToolError, match="Unsupported labels"):
+                await client.call_tool("get_tasks_by_synergy", {"label": "bogus"})
+    finally:
+        await todoist.aclose()
+
+
+@respx.mock
+async def test_capture_in_batch_dedup_and_mutation_input_guardrails(tmp_path: Path) -> None:
+    respx.get(f"{TODOIST_API_V1_BASE}/projects").mock(
+        return_value=httpx.Response(
+            200,
+            json={"results": [{"id": "p1", "name": "Personal"}], "next_cursor": None},
+        )
+    )
+    respx.get(f"{TODOIST_API_V1_BASE}/tasks").mock(
+        return_value=httpx.Response(200, json={"results": [], "next_cursor": None})
+    )
+    respx.post(f"{TODOIST_API_V1_BASE}/sync").mock(
+        side_effect=lambda req: httpx.Response(
+            200,
+            json={
+                "sync_status": {
+                    cmd["uuid"]: "ok" for cmd in json.loads(req.content)["commands"]
+                },
+                "temp_id_mapping": {
+                    cmd["temp_id"]: f"id-{i}"
+                    for i, cmd in enumerate(json.loads(req.content)["commands"])
+                },
+            },
+        )
+    )
+
+    cfg, env = _make_config(tmp_path)
+    todoist = TodoistClient("test-token")
+    mcp = create_server(cfg, env, todoist=todoist)
+
+    try:
+        async with Client(mcp) as client:
+            res = (
+                await client.call_tool(
+                    "capture_items",
+                    {
+                        "items": [
+                            {"content": "Call dentist", "project": "Personal"},
+                            {"content": "  call   DENTIST ", "project": "Personal"},
+                        ]
+                    },
+                )
+            ).data
+            assert [c["content"] for c in res["created"]] == ["Call dentist"]
+            assert res["skipped_duplicates"] == [
+                {"content": "call   DENTIST", "project": "Personal"}
+            ]
+
+            with pytest.raises(ToolError, match="not allowed"):
+                await client.call_tool(
+                    "update_or_reschedule",
+                    {"task_id": "t1", "project": "WorkSecret"},
+                )
+            with pytest.raises(ToolError, match="between 1 and 4"):
+                await client.call_tool(
+                    "update_or_reschedule",
+                    {"task_id": "t1", "priority": 5},
+                )
+            with pytest.raises(ToolError, match="Invalid task_id"):
+                await client.call_tool("complete_task", {"task_id": "../bad"})
+    finally:
+        await todoist.aclose()

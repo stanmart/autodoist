@@ -367,3 +367,116 @@ async def test_run_sync_paginates_completed_tasks_and_preserves_token_on_500(
         await client.aclose()
 
     assert completed_route.call_count == 3
+
+
+@respx.mock
+async def test_project_cache_eviction_rename_and_mid_lifetime_refresh(
+    tmp_path: Path,
+) -> None:
+    now = datetime.now(UTC)
+    db = Database(tmp_path / "cache.db")
+    db.init_db()
+    db.update_sync_state("tok-1", _iso(now - timedelta(hours=1)))
+
+    respx.get(f"{TODOIST_API_V1_BASE}/projects").mock(
+        side_effect=[
+            httpx.Response(
+                200,
+                json={"results": [{"id": "p1", "name": "Personal"}], "next_cursor": None},
+            ),
+            httpx.Response(
+                200,
+                json={
+                    "results": [
+                        {"id": "p1", "name": "Personal"},
+                        {"id": "p2", "name": "Household"},
+                    ],
+                    "next_cursor": None,
+                },
+            ),
+            httpx.Response(
+                200,
+                json={
+                    "results": [
+                        {"id": "p1", "name": "Personal"},
+                        {"id": "p2", "name": "Household"},
+                    ],
+                    "next_cursor": None,
+                },
+            ),
+        ]
+    )
+    respx.post(f"{TODOIST_API_V1_BASE}/sync").mock(
+        return_value=httpx.Response(
+            200,
+            json={
+                "sync_token": "tok-2",
+                "items": [
+                    {
+                        "id": "301",
+                        "content": "Mop floor",
+                        "project_id": "p2",
+                        "checked": True,
+                        "is_deleted": False,
+                        "completed_at": _iso(now - timedelta(minutes=5)),
+                    }
+                ],
+            },
+        )
+    )
+    respx.get(f"{TODOIST_API_V1_BASE}/tasks/completed/by_completion_date").mock(
+        return_value=httpx.Response(200, json={"items": [], "next_cursor": None})
+    )
+
+    client = TodoistClient("test-token")
+    try:
+        # Warm cache with only p1, then test rename/archive eviction directly
+        assert await client.get_project_id("Personal") == "p1"
+        client.update_projects_cache([{"id": "p1", "name": "PersonalRenamed"}])
+        assert client.get_project_name("p1") == "PersonalRenamed"
+        assert "Personal" not in client._name_to_id
+        client.update_projects_cache(
+            [{"id": "p1", "name": "PersonalRenamed", "is_archived": True}]
+        )
+        assert client.get_project_name("p1") is None
+
+        # Restore p1 without p2 so run_sync sees unknown p2 and forces refresh
+        client.update_projects_cache([{"id": "p1", "name": "Personal"}])
+        summary = await run_sync(db, client, ["Inbox", "Personal", "Household"])
+        assert summary["inserted_completions"] == 1
+        assert db.get_completion_history(days=7)[0]["content"] == "Mop floor"
+
+        with pytest.raises(ValueError, match="not found in Todoist"):
+            await client.get_project_id("DoesNotExist")
+    finally:
+        await client.aclose()
+
+
+@respx.mock
+async def test_update_task_non_recurring_and_noop() -> None:
+    sync_route = respx.post(f"{TODOIST_API_V1_BASE}/sync").mock(
+        side_effect=lambda req: httpx.Response(
+            200,
+            json={
+                "sync_status": {
+                    cmd["uuid"]: "ok" for cmd in json.loads(req.content)["commands"]
+                }
+            },
+        )
+    )
+
+    existing = {"id": "t50", "project_id": "p1", "due": None}
+    client = TodoistClient("test-token")
+    try:
+        # No-op makes zero HTTP requests
+        await client.update_task("t50", existing, project_id="p1")
+        assert sync_route.call_count == 0
+
+        await client.update_task("t50", existing, new_due_date="2026-12-05")
+    finally:
+        await client.aclose()
+
+    assert sync_route.call_count == 1
+    cmd = json.loads(sync_route.calls[0].request.content)["commands"][0]
+    assert cmd["type"] == "item_update"
+    assert cmd["args"]["due"] == {"date": "2026-12-05"}
