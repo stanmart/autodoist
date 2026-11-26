@@ -26,7 +26,7 @@ class AuthConfig(BaseModel):
 
     mcp_base_url: str = ""
     pocket_id_issuer: str = "https://id.csigahaz.eu"
-    jwt_audience: str | None = None
+    jwt_audience: str | list[str] | None = None
     allowed_user_subs: frozenset[str] = frozenset()
 
     @field_validator("mcp_base_url", "pocket_id_issuer", mode="after")
@@ -36,9 +36,15 @@ class AuthConfig(BaseModel):
 
     @field_validator("jwt_audience", mode="before")
     @classmethod
-    def empty_str_to_none(cls, value: object) -> object:
-        if isinstance(value, str) and not value.strip():
+    def normalize_jwt_audience(cls, value: object) -> object:
+        if value is None:
             return None
+        if isinstance(value, str):
+            stripped = value.strip()
+            return stripped or None
+        if isinstance(value, list):
+            cleaned = [str(item).strip() for item in value if str(item).strip()]
+            return cleaned or None
         return value
 
     @field_validator("allowed_user_subs", mode="before")

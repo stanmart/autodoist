@@ -5,7 +5,7 @@ import logging
 import re
 from contextlib import asynccontextmanager
 from datetime import UTC, date, datetime
-from typing import Any, Literal
+from typing import Annotated, Any, Literal
 
 import uvicorn
 from fastmcp import FastMCP
@@ -13,7 +13,7 @@ from fastmcp.server.auth import RemoteAuthProvider
 from fastmcp.server.auth.providers.jwt import JWTVerifier
 from fastmcp.server.dependencies import get_access_token
 from mcp.server.auth.middleware.bearer_auth import AuthenticatedUser
-from pydantic import AnyHttpUrl, BaseModel, Field, field_validator
+from pydantic import AnyHttpUrl, BaseModel, Field, TypeAdapter, UrlConstraints, field_validator
 from starlette.middleware import Middleware
 from starlette.requests import Request
 from starlette.responses import JSONResponse
@@ -25,6 +25,10 @@ from src.sync_worker import run_sync
 from src.todoist import CaptureTaskInput, TodoistClient
 
 logger = logging.getLogger(__name__)
+
+_ISSUER_URL_ADAPTER = TypeAdapter(Annotated[AnyHttpUrl, UrlConstraints(preserve_empty_path=True)])
+_TASK_ID_RE = re.compile(r"[A-Za-z0-9_-]+")
+_ISO_DATE_RE = re.compile(r"\d{4}-\d{2}-\d{2}")
 
 
 class CaptureItem(BaseModel):
@@ -44,6 +48,14 @@ class CaptureItem(BaseModel):
             if not stripped:
                 raise ValueError("value must not be empty")
             return stripped
+        return value
+
+    @field_validator("due_string", mode="before")
+    @classmethod
+    def normalize_due_string(cls, value: object) -> object:
+        if isinstance(value, str):
+            stripped = value.strip()
+            return stripped or None
         return value
 
 
@@ -73,6 +85,12 @@ def _normalize_text(text: str) -> str:
     return re.sub(r"\s+", " ", text.strip().lower())
 
 
+def _validate_task_id(task_id: str) -> str:
+    if not _TASK_ID_RE.fullmatch(task_id):
+        raise ValueError(f"Invalid task_id {task_id!r}")
+    return task_id
+
+
 def _validate_labels(labels: list[str], allowed_labels: list[str]) -> list[str]:
     allowed_set = set(allowed_labels)
     invalid = sorted({lbl for lbl in labels if lbl not in allowed_set})
@@ -94,11 +112,20 @@ def _require_authorized_user(app_config: AppConfig, env: EnvSettings) -> None:
         raise PermissionError("User is not authorized to access this server")
 
 
-def build_auth_provider(app_config: AppConfig, env: EnvSettings) -> RemoteAuthProvider | None:
+def build_auth_provider(
+    app_config: AppConfig,
+    env: EnvSettings,
+    *,
+    token_verifier: JWTVerifier | None = None,
+) -> RemoteAuthProvider | None:
     if env.auth_disabled:
         return None
     issuer = app_config.auth.pocket_id_issuer
-    verifier = JWTVerifier(
+    if app_config.auth.jwt_audience is None and token_verifier is None:
+        logger.warning(
+            "auth.jwt_audience is unset; set it once Gemini/Pocket ID aud is verified"
+        )
+    verifier = token_verifier or JWTVerifier(
         jwks_uri=f"{issuer}/.well-known/jwks.json",
         issuer=issuer,
         audience=app_config.auth.jwt_audience,
@@ -106,7 +133,7 @@ def build_auth_provider(app_config: AppConfig, env: EnvSettings) -> RemoteAuthPr
     )
     return RemoteAuthProvider(
         token_verifier=verifier,
-        authorization_servers=[AnyHttpUrl(issuer)],
+        authorization_servers=[_ISSUER_URL_ADAPTER.validate_python(issuer)],
         base_url=AnyHttpUrl(app_config.auth.mcp_base_url),
         resource_name="autodoist",
     )
@@ -129,6 +156,7 @@ def create_server(
     *,
     db: Database | None = None,
     todoist: TodoistClient | None = None,
+    token_verifier: JWTVerifier | None = None,
 ) -> FastMCP:
     validate_runtime_security(app_config, env)
 
@@ -150,7 +178,7 @@ def create_server(
 
     mcp = FastMCP(
         name="autodoist",
-        auth=build_auth_provider(app_config, env),
+        auth=build_auth_provider(app_config, env, token_verifier=token_verifier),
         lifespan=_lifespan,
     )
 
@@ -164,7 +192,9 @@ def create_server(
         if not expected:
             return JSONResponse({"error": "sync_secret_not_configured"}, status_code=503)
         provided = request.headers.get("X-Sync-Secret", "")
-        if not provided or not hmac.compare_digest(provided, expected):
+        if not provided or not hmac.compare_digest(
+            provided.encode("utf-8"), expected.encode("utf-8")
+        ):
             return JSONResponse({"error": "forbidden"}, status_code=403)
         result = await run_sync(database, todoist_client, rules.allowed_projects)
         return JSONResponse({"status": "ok", **result})
@@ -238,23 +268,17 @@ def create_server(
             validated.append((item, clean_labels))
 
         task_candidates: list[tuple[CaptureItem, list[str]]] = []
-        logged_post_hoc: list[dict[str, str]] = []
+        post_hoc_items: list[tuple[CaptureItem, list[str]]] = []
         for item, clean_labels in validated:
             if item.mode == "post_hoc":
-                database.record_completion(
-                    todoist_task_id=None,
-                    content=item.content,
-                    project_name=item.project,
-                    labels=clean_labels,
-                    source="post_hoc_log",
-                )
-                logged_post_hoc.append({"content": item.content, "project": item.project})
+                post_hoc_items.append((item, clean_labels))
             else:
                 task_candidates.append((item, clean_labels))
 
         created: list[dict[str, str]] = []
         skipped_duplicates: list[dict[str, str]] = []
 
+        # Submit Todoist tasks first so transient failures never half-commit post_hoc rows
         if task_candidates:
             existing_by_project: dict[str, set[str]] = {}
             target_projects = sorted({item.project for item, _ in task_candidates})
@@ -288,6 +312,17 @@ def create_server(
             if batch_inputs:
                 created = await todoist_client.batch_add_tasks(batch_inputs)
 
+        logged_post_hoc: list[dict[str, str]] = []
+        for item, clean_labels in post_hoc_items:
+            database.record_completion(
+                todoist_task_id=None,
+                content=item.content,
+                project_name=item.project,
+                labels=clean_labels,
+                source="post_hoc_log",
+            )
+            logged_post_hoc.append({"content": item.content, "project": item.project})
+
         return {
             "created": created,
             "skipped_duplicates": skipped_duplicates,
@@ -305,8 +340,9 @@ def create_server(
     ) -> dict[str, Any]:
         """Safely edit a task or move its due date while preserving recurrence."""
         _require_authorized_user(app_config, env)
+        _validate_task_id(task_id)
         if new_due_date is not None:
-            if len(new_due_date) != 10:
+            if not _ISO_DATE_RE.fullmatch(new_due_date):
                 raise ValueError("new_due_date must use YYYY-MM-DD format")
             date.fromisoformat(new_due_date)
         if priority is not None and not (1 <= priority <= 4):
@@ -330,15 +366,14 @@ def create_server(
                 "which is outside allowed_projects"
             )
 
+        existing_labels = [str(lbl) for lbl in (existing.get("labels") or [])]
         final_labels: list[str] | None = None
         if clean_labels is not None or clear_review_flag:
-            base_labels = (
-                clean_labels
-                if clean_labels is not None
-                else [str(lbl) for lbl in (existing.get("labels") or [])]
-            )
+            base_labels = list(clean_labels) if clean_labels is not None else list(existing_labels)
             if clear_review_flag:
                 base_labels = [lbl for lbl in base_labels if lbl != rules.review_label]
+            elif rules.review_label in existing_labels and rules.review_label not in base_labels:
+                base_labels.append(rules.review_label)
             final_labels = base_labels
 
         target_project_id = await todoist_client.get_project_id(project) if project else None
@@ -353,7 +388,10 @@ def create_server(
 
         due = existing.get("due")
         preserved_recurrence = bool(
-            new_due_date and isinstance(due, dict) and due.get("is_recurring")
+            new_due_date
+            and isinstance(due, dict)
+            and due.get("is_recurring")
+            and due.get("string")
         )
         return {
             "task_id": task_id,
@@ -365,6 +403,7 @@ def create_server(
     async def complete_task(task_id: str) -> dict[str, Any]:
         """Mark a task completed in Todoist and immediately log it in completion_log."""
         _require_authorized_user(app_config, env)
+        _validate_task_id(task_id)
         await todoist_client.ensure_projects_loaded()
         existing = await todoist_client.get_task(task_id)
         project_name = todoist_client.get_project_name(str(existing.get("project_id") or ""))
@@ -402,7 +441,11 @@ def create_server(
             raise ValueError(
                 f"Project {project!r} is not allowed; allowed projects: {rules.allowed_projects}"
             )
-        return database.get_completion_history(days=days, project=project)
+        return database.get_completion_history(
+            days=days,
+            project=project,
+            allowed_projects=rules.allowed_projects,
+        )
 
     return mcp
 

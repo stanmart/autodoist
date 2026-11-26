@@ -1,23 +1,23 @@
 from __future__ import annotations
 
 import json
+import time
 from pathlib import Path
 
 import httpx
+import jwt
 import pytest
 import respx
+from cryptography.hazmat.primitives import serialization
+from cryptography.hazmat.primitives.asymmetric import rsa
 from fastmcp import Client
 from fastmcp.exceptions import ToolError
-from fastmcp.server.auth import AccessToken
-from mcp.server.auth.middleware.bearer_auth import AuthenticatedUser
-from starlette.applications import Starlette
-from starlette.responses import JSONResponse
-from starlette.routing import Route
+from fastmcp.server.auth.providers.jwt import JWTVerifier
 from starlette.testclient import TestClient
 
 from src.config import AppConfig, AuthConfig, EnvSettings, RulesConfig, StorageConfig
 from src.db import Database
-from src.server import _AllowedUserASGIMiddleware, build_http_middleware, create_server
+from src.server import build_http_middleware, create_server
 from src.todoist import TODOIST_API_V1_BASE, TodoistClient
 
 
@@ -26,6 +26,7 @@ def _make_config(
     *,
     auth_disabled: bool = True,
     allowed_user_subs: frozenset[str] = frozenset({"sub-allowed"}),
+    jwt_audience: str | list[str] | None = "https://mcp.example.com",
     sync_secret: str = "sync-secret-123",
 ) -> tuple[AppConfig, EnvSettings]:
     cfg = AppConfig(
@@ -33,6 +34,7 @@ def _make_config(
         auth=AuthConfig(
             mcp_base_url="https://mcp.example.com",
             pocket_id_issuer="https://id.csigahaz.eu",
+            jwt_audience=jwt_audience,
             allowed_user_subs=allowed_user_subs,
         ),
         rules=RulesConfig(
@@ -50,6 +52,15 @@ def _make_config(
         auth_disabled=auth_disabled,
     )
     return cfg, env
+
+
+def _generate_rsa_keypair() -> tuple[rsa.RSAPrivateKey, str]:
+    private_key = rsa.generate_private_key(public_exponent=65537, key_size=2048)
+    public_pem = private_key.public_key().public_bytes(
+        encoding=serialization.Encoding.PEM,
+        format=serialization.PublicFormat.SubjectPublicKeyInfo,
+    )
+    return private_key, public_pem.decode("utf-8")
 
 
 async def test_only_five_safe_tools_are_registered(tmp_path: Path) -> None:
@@ -123,14 +134,12 @@ async def test_capture_items_guardrails_review_tag_duplicates_and_post_hoc(
 
     try:
         async with Client(mcp) as client:
-            # Inbox rejected in capture_items
             with pytest.raises(ToolError, match="not allowed for capture"):
                 await client.call_tool(
                     "capture_items",
                     {"items": [{"content": "Triage", "project": "Inbox"}]},
                 )
 
-            # Unknown label rejected
             with pytest.raises(ToolError, match="Unsupported labels"):
                 await client.call_tool(
                     "capture_items",
@@ -145,7 +154,6 @@ async def test_capture_items_guardrails_review_tag_duplicates_and_post_hoc(
                     },
                 )
 
-            # Valid capture: duplicate skipped, new task gets review label, post_hoc logs to DB
             res = await client.call_tool(
                 "capture_items",
                 {
@@ -195,9 +203,46 @@ async def test_capture_items_guardrails_review_tag_duplicates_and_post_hoc(
 
 
 @respx.mock
-async def test_inbox_allowed_in_synergy_and_reschedule_preserves_recurrence(
+async def test_capture_items_does_not_commit_post_hoc_when_sync_fails(
     tmp_path: Path,
 ) -> None:
+    respx.get(f"{TODOIST_API_V1_BASE}/projects").mock(
+        return_value=httpx.Response(
+            200,
+            json={"results": [{"id": "p1", "name": "Personal"}], "next_cursor": None},
+        )
+    )
+    respx.get(f"{TODOIST_API_V1_BASE}/tasks").mock(
+        return_value=httpx.Response(200, json={"results": [], "next_cursor": None})
+    )
+    respx.post(f"{TODOIST_API_V1_BASE}/sync").mock(
+        return_value=httpx.Response(500, json={"error": "upstream down"})
+    )
+
+    cfg, env = _make_config(tmp_path)
+    db = Database(cfg.storage.db_path)
+    todoist = TodoistClient("test-token")
+    mcp = create_server(cfg, env, db=db, todoist=todoist)
+
+    try:
+        async with Client(mcp) as client:
+            with pytest.raises(ToolError):
+                await client.call_tool(
+                    "capture_items",
+                    {
+                        "items": [
+                            {"content": "New task", "mode": "task", "project": "Personal"},
+                            {"content": "Walked dog", "mode": "post_hoc", "project": "Personal"},
+                        ]
+                    },
+                )
+            assert db.get_completion_history(days=30) == []
+    finally:
+        await todoist.aclose()
+
+
+@respx.mock
+async def test_synergy_and_reschedule_guardrails(tmp_path: Path) -> None:
     respx.get(f"{TODOIST_API_V1_BASE}/projects").mock(
         return_value=httpx.Response(
             200,
@@ -251,6 +296,12 @@ async def test_inbox_allowed_in_synergy_and_reschedule_preserves_recurrence(
             },
         )
     )
+    respx.get(f"{TODOIST_API_V1_BASE}/tasks/t-hidden").mock(
+        return_value=httpx.Response(
+            200,
+            json={"id": "t-hidden", "content": "Secret work", "project_id": "p9"},
+        )
+    )
     sync_route = respx.post(f"{TODOIST_API_V1_BASE}/sync").mock(
         side_effect=lambda req: httpx.Response(
             200,
@@ -271,6 +322,31 @@ async def test_inbox_allowed_in_synergy_and_reschedule_preserves_recurrence(
             synergy = (await client.call_tool("get_tasks_by_synergy", {})).data
             assert [t["id"] for t in synergy["15min"]] == ["t1"]
 
+            # Reject ISO week date and path traversal task_id
+            with pytest.raises(ToolError, match="YYYY-MM-DD"):
+                await client.call_tool(
+                    "update_or_reschedule",
+                    {"task_id": "t1", "new_due_date": "2026-W48-1"},
+                )
+            with pytest.raises(ToolError, match="Invalid task_id"):
+                await client.call_tool(
+                    "update_or_reschedule",
+                    {"task_id": "../secret", "priority": 2},
+                )
+
+            # Reject task outside allowed_projects
+            with pytest.raises(ToolError, match="outside allowed_projects"):
+                await client.call_tool(
+                    "update_or_reschedule",
+                    {"task_id": "t-hidden", "priority": 2},
+                )
+
+            # Updating labels with clear_review_flag=False preserves review
+            await client.call_tool(
+                "update_or_reschedule",
+                {"task_id": "t1", "labels": ["home"]},
+            )
+            # Explicit clear_review_flag=True removes review & preserves recurrence
             upd = (
                 await client.call_tool(
                     "update_or_reschedule",
@@ -285,18 +361,27 @@ async def test_inbox_allowed_in_synergy_and_reschedule_preserves_recurrence(
     finally:
         await todoist.aclose()
 
-    cmd = json.loads(sync_route.calls[0].request.content)["commands"][0]
-    assert cmd["args"]["labels"] == ["15min"]
-    assert cmd["args"]["due"]["string"] == "every week"
-    assert cmd["args"]["due"]["is_recurring"] is True
+    first_cmd = json.loads(sync_route.calls[0].request.content)["commands"][0]
+    assert first_cmd["args"]["labels"] == ["home", "review"]
+
+    second_cmd = json.loads(sync_route.calls[1].request.content)["commands"][0]
+    assert second_cmd["args"]["labels"] == ["15min"]
+    assert second_cmd["args"]["due"]["string"] == "every week"
+    assert second_cmd["args"]["due"]["is_recurring"] is True
 
 
 @respx.mock
-async def test_complete_task_closes_and_logs_completion(tmp_path: Path) -> None:
+async def test_complete_task_and_history_project_isolation(tmp_path: Path) -> None:
     respx.get(f"{TODOIST_API_V1_BASE}/projects").mock(
         return_value=httpx.Response(
             200,
-            json={"results": [{"id": "p1", "name": "Personal"}], "next_cursor": None},
+            json={
+                "results": [
+                    {"id": "p1", "name": "Personal"},
+                    {"id": "p9", "name": "HiddenWork"},
+                ],
+                "next_cursor": None,
+            },
         )
     )
     respx.get(f"{TODOIST_API_V1_BASE}/tasks/t42").mock(
@@ -310,16 +395,38 @@ async def test_complete_task_closes_and_logs_completion(tmp_path: Path) -> None:
             },
         )
     )
+    respx.get(f"{TODOIST_API_V1_BASE}/tasks/t99").mock(
+        return_value=httpx.Response(
+            200,
+            json={
+                "id": "t99",
+                "content": "Secret work",
+                "project_id": "p9",
+                "labels": [],
+            },
+        )
+    )
     close_route = respx.post(f"{TODOIST_API_V1_BASE}/tasks/t42/close").mock(
         return_value=httpx.Response(204)
     )
 
     cfg, env = _make_config(tmp_path)
+    db = Database(cfg.storage.db_path)
+    db.init_db()
+    db.record_completion(
+        todoist_task_id="legacy",
+        content="Legacy project task",
+        project_name="HiddenWork",
+        source="todoist_sync",
+    )
     todoist = TodoistClient("test-token")
-    mcp = create_server(cfg, env, todoist=todoist)
+    mcp = create_server(cfg, env, db=db, todoist=todoist)
 
     try:
         async with Client(mcp) as client:
+            with pytest.raises(ToolError, match="outside allowed_projects"):
+                await client.call_tool("complete_task", {"task_id": "t99"})
+
             res = (await client.call_tool("complete_task", {"task_id": "t42"})).data
             assert res["completed"] is True
             history = (await client.call_tool("get_completion_history", {"days": 7})).data
@@ -331,8 +438,21 @@ async def test_complete_task_closes_and_logs_completion(tmp_path: Path) -> None:
 
 
 @respx.mock
-def test_http_routes_authz_and_internal_sync_secret(tmp_path: Path) -> None:
-    cfg, env = _make_config(tmp_path, auth_disabled=False)
+def test_http_jwt_authz_discovery_and_internal_sync_secret(tmp_path: Path) -> None:
+    private_key, public_pem = _generate_rsa_keypair()
+    cfg, env = _make_config(
+        tmp_path,
+        auth_disabled=False,
+        allowed_user_subs=frozenset({"sub-allowed"}),
+        jwt_audience="https://mcp.example.com",
+    )
+    verifier = JWTVerifier(
+        public_key=public_pem,
+        issuer="https://id.csigahaz.eu",
+        audience="https://mcp.example.com",
+        algorithm="RS256",
+    )
+
     respx.post(f"{TODOIST_API_V1_BASE}/sync").mock(
         return_value=httpx.Response(200, json={"sync_token": "t-1", "items": [], "projects": []})
     )
@@ -345,18 +465,62 @@ def test_http_routes_authz_and_internal_sync_secret(tmp_path: Path) -> None:
         return_value=httpx.Response(200, json={"items": [], "next_cursor": None})
     )
 
-    mcp = create_server(cfg, env)
+    mcp = create_server(cfg, env, token_verifier=verifier)
     app = mcp.http_app(
         transport="streamable-http",
         middleware=build_http_middleware(cfg, env),
     )
 
+    now = int(time.time())
+
+    def _mint(sub: str, aud: str = "https://mcp.example.com") -> str:
+        return jwt.encode(
+            {
+                "sub": sub,
+                "iss": "https://id.csigahaz.eu",
+                "aud": aud,
+                "iat": now,
+                "exp": now + 300,
+            },
+            private_key,
+            algorithm="RS256",
+        )
+
     with TestClient(app) as client:
         assert client.get("/health").status_code == 200
+
+        # RFC 8414 requires exact issuer without spurious trailing slash
         prm = client.get("/.well-known/oauth-protected-resource/mcp")
         assert prm.status_code == 200
-        assert prm.json()["authorization_servers"] == ["https://id.csigahaz.eu/"]
+        assert prm.json()["authorization_servers"] == ["https://id.csigahaz.eu"]
+
+        # Unauthenticated or wrong audience -> 401
         assert client.post("/mcp").status_code == 401
+        wrong_aud = _mint("sub-allowed", aud="other-client")
+        assert (
+            client.post("/mcp", headers={"Authorization": f"Bearer {wrong_aud}"}).status_code
+            == 401
+        )
+
+        # Valid JWT for disallowed sub -> 403
+        intruder_jwt = _mint("sub-intruder")
+        resp_403 = client.post("/mcp", headers={"Authorization": f"Bearer {intruder_jwt}"})
+        assert resp_403.status_code == 403
+        assert resp_403.json()["error"] == "forbidden"
+
+        # Valid JWT for allowed sub passes auth & authz (reaches MCP handler)
+        allowed_jwt = _mint("sub-allowed")
+        resp_ok = client.post(
+            "/mcp",
+            headers={
+                "Authorization": f"Bearer {allowed_jwt}",
+                "Accept": "application/json, text/event-stream",
+            },
+            json={"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {}},
+        )
+        assert resp_ok.status_code not in (401, 403)
+
+        # /internal/sync secret checks
         assert client.post("/internal/sync").status_code == 403
         assert (
             client.post("/internal/sync", headers={"X-Sync-Secret": "wrong"}).status_code == 403
@@ -364,39 +528,3 @@ def test_http_routes_authz_and_internal_sync_secret(tmp_path: Path) -> None:
         ok_sync = client.post("/internal/sync", headers={"X-Sync-Secret": "sync-secret-123"})
         assert ok_sync.status_code == 200
         assert ok_sync.json()["status"] == "ok"
-
-
-def test_allowed_user_middleware_returns_403_for_disallowed_sub() -> None:
-    async def ok_endpoint(_request: object) -> JSONResponse:
-        return JSONResponse({"ok": True})
-
-    base_app = Starlette(routes=[Route("/mcp", ok_endpoint, methods=["POST"])])
-
-    def _with_sub(sub: str) -> _AllowedUserASGIMiddleware:
-        mw = _AllowedUserASGIMiddleware(base_app, frozenset({"sub-allowed"}))
-
-        class InjectUser:
-            def __init__(self, inner: _AllowedUserASGIMiddleware) -> None:
-                self.inner = inner
-
-            async def __call__(self, scope: dict, receive: object, send: object) -> None:
-                if scope["type"] == "http":
-                    token = AccessToken(
-                        token="jwt",
-                        client_id="gemini",
-                        scopes=[],
-                        claims={"sub": sub},
-                    )
-                    scope["user"] = AuthenticatedUser(token)
-                await self.inner(scope, receive, send)
-
-        return InjectUser(mw)  # type: ignore[return-value]
-
-    with TestClient(_with_sub("sub-intruder")) as bad_client:
-        resp = bad_client.post("/mcp")
-        assert resp.status_code == 403
-        assert resp.json()["error"] == "forbidden"
-
-    with TestClient(_with_sub("sub-allowed")) as good_client:
-        resp = good_client.post("/mcp")
-        assert resp.status_code == 200
