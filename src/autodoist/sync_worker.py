@@ -35,6 +35,9 @@ async def run_sync(
     for item in items:
         if item.is_deleted or not item.checked:
             continue
+        if not item.completed_at:
+            logger.debug("Skipping checked item %s with missing completed_at", item.id)
+            continue
         project_name = todoist.get_project_name(item.project_id)
         if project_name not in allowed_set:
             continue
@@ -44,7 +47,7 @@ async def run_sync(
                 content=item.content,
                 project_name=project_name,
                 labels=item.labels,
-                completed_at=item.completed_at or now_iso,
+                completed_at=item.completed_at,
                 source="todoist_sync",
             )
         )
@@ -71,6 +74,9 @@ async def run_sync(
             raise
 
     for event in events:
+        if not event.completed_at:
+            logger.debug("Skipping activity event %s with missing completed_at", event.task_id)
+            continue
         project_name = todoist.get_project_name(event.project_id)
         if project_name not in allowed_set:
             continue
@@ -80,7 +86,7 @@ async def run_sync(
                 content=event.content,
                 project_name=project_name,
                 labels=[],
-                completed_at=event.completed_at or now_iso,
+                completed_at=event.completed_at,
                 source="todoist_sync",
             )
         )

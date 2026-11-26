@@ -17,15 +17,12 @@ from autodoist.models import (
     SkippedDuplicateOut,
     TaskOut,
     UpdateTaskResult,
+    normalize_text,
 )
 from autodoist.todoist import TodoistClient
 
 _TASK_ID_RE = re.compile(r"[A-Za-z0-9_-]+")
 _ISO_DATE_RE = re.compile(r"\d{4}-\d{2}-\d{2}")
-
-
-def _normalize_text(text: str) -> str:
-    return re.sub(r"\s+", " ", text.strip().lower())
 
 
 def _validate_task_id(task_id: str) -> str:
@@ -142,12 +139,12 @@ class AutodoistService:
                 pid = await self.todoist.get_project_id(proj_name)
                 active = await self.todoist.get_active_tasks(project_id=pid)
                 existing_by_project[proj_name] = {
-                    _normalize_text(t.content) for t in active
+                    normalize_text(t.content) for t in active
                 }
 
             batch_inputs: list[CaptureTaskInput] = []
             for item, clean_labels in task_candidates:
-                norm = _normalize_text(item.content)
+                norm = normalize_text(item.content)
                 proj_seen = existing_by_project[item.project]
                 if norm in proj_seen:
                     skipped_duplicates.append(
@@ -172,7 +169,21 @@ class AutodoistService:
 
         post_hoc_records: list[CompletionRecord] = []
         logged_post_hoc: list[PostHocLoggedOut] = []
+        seen_post_hoc: set[tuple[str, str]] = set()
         for item, clean_labels in post_hoc_items:
+            norm = normalize_text(item.content)
+            key = (item.project, norm)
+            is_dup = key in seen_post_hoc or await asyncio.to_thread(
+                self.db.has_recent_post_hoc,
+                item.content,
+                item.project,
+            )
+            if is_dup:
+                skipped_duplicates.append(
+                    SkippedDuplicateOut(content=item.content, project=item.project)
+                )
+                continue
+            seen_post_hoc.add(key)
             post_hoc_records.append(
                 CompletionRecord(
                     todoist_task_id=None,

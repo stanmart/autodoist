@@ -521,3 +521,59 @@ async def test_sync_loop_recovers_from_transient_error_and_cancels_cleanly(
         with pytest.raises(asyncio.CancelledError):
             await task
         await client.aclose()
+
+
+@respx.mock
+async def test_run_sync_skips_items_and_events_missing_completed_at(tmp_path: Path) -> None:
+    db = Database(tmp_path / "missing_ts.db")
+    db.init_db()
+
+    respx.get(f"{TODOIST_API_V1_BASE}/projects").mock(
+        return_value=httpx.Response(
+            200,
+            json={"results": [{"id": "p1", "name": "Personal"}], "next_cursor": None},
+        )
+    )
+    respx.post(f"{TODOIST_API_V1_BASE}/sync").mock(
+        return_value=httpx.Response(
+            200,
+            json={
+                "sync_token": "tok-skip",
+                "items": [
+                    {
+                        "id": "no-ts-1",
+                        "content": "Checked without timestamp",
+                        "project_id": "p1",
+                        "checked": True,
+                        "is_deleted": False,
+                        "completed_at": None,
+                    }
+                ],
+            },
+        )
+    )
+    respx.get(f"{TODOIST_API_V1_BASE}/activities").mock(
+        return_value=httpx.Response(
+            200,
+            json={
+                "results": [
+                    {
+                        "object_id": "no-ts-2",
+                        "parent_project_id": "p1",
+                        "event_date": None,
+                        "extra_data": {"content": "Activity without timestamp"},
+                    }
+                ],
+                "next_cursor": None,
+            },
+        )
+    )
+
+    client = TodoistClient("test-token")
+    try:
+        summary = await run_sync(db, client, ["Personal"])
+    finally:
+        await client.aclose()
+
+    assert summary["inserted_completions"] == 0
+    assert db.get_completion_history(days=30) == []

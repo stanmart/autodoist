@@ -5,7 +5,7 @@ A lean MCP server and mini-backend sitting between an MCP client (e.g. **Gemini*
 ## MCP Tools (5)
 
 - `get_tasks_by_synergy`: Fetch active tasks within allowed projects, grouped by synergy label and sorted by priority/due date.
-- `capture_items`: Batch-create tasks (enforcing capture project allowlist, duplicate skipping, and mandatory `review` label) or log `post_hoc` completions directly to SQLite.
+- `capture_items`: Batch-create tasks (enforcing capture project allowlist, duplicate skipping, and mandatory `review` label) or log `post_hoc` completions directly to SQLite (with retry dedup).
 - `update_or_reschedule`: Safely update labels/priority/project or move due dates while preserving recurrence and keeping `review` unless `clear_review_flag=true`.
 - `complete_task`: Close an allowed task in Todoist and immediately log it in `completion_log`.
 - `get_completion_history`: Query up to 365 days of completion history from SQLite.
@@ -15,7 +15,7 @@ A lean MCP server and mini-backend sitting between an MCP client (e.g. **Gemini*
 Non-secret settings live in `config.toml` (copy from [config.example.toml](config.example.toml); `AUTODOIST_CONFIG` overrides the path):
 
 - `[storage]`: `db_path` (default `data/autodoist.db`)
-- `[auth]`: `mcp_base_url`, `oidc_issuer`, optional `oidc_jwks_uri`, `jwt_algorithm` (default `RS256`), optional `jwt_audience`, `allowed_user_subs`
+- `[auth]`: `mcp_base_url`, `oidc_issuer`, optional `oidc_jwks_uri`, `jwt_algorithm` (default `RS256`), `jwt_audience` (required when `AUTH_DISABLED=false`), `allowed_user_subs`
 - `[sync]`: `interval_minutes` (default `30`; `0` disables background sync)
 - `[rules]`: `allowed_projects`, `capture_projects`, `allowed_labels`, `synergy_labels`, `review_label`, `timezone` (default `UTC`)
 
@@ -53,8 +53,8 @@ uv run pyrefly check
 The HTTP server runs in stateless JSON response mode (`stateless_http=True, json_response=True`) so it works cleanly behind Synology DSM's Nginx reverse proxy without SSE buffering issues or session drops across container restarts.
 
 1. Copy `.env.example` to `.env` and set `TODOIST_API_TOKEN`.
-2. Copy `config.example.toml` to `config.toml` and set `mcp_base_url`, `oidc_issuer` (plus `oidc_jwks_uri` if your provider does not use `/.well-known/jwks.json`), `allowed_user_subs`, and `rules.timezone`.
-3. Ensure `config.toml` is readable by container UID `10001` (`chmod 644 config.toml`). If you replace the named `autodoist_data` volume with a host bind mount (e.g. on Synology), `chown -R 10001:10001 /path/to/data`.
+2. Copy `config.example.toml` to `config.toml` and set `mcp_base_url`, `oidc_issuer` (plus `oidc_jwks_uri` if your provider does not use `/.well-known/jwks.json`), `jwt_audience`, `allowed_user_subs`, and `rules.timezone`.
+3. Ensure `config.toml` is readable by the container user. If you use a Synology host bind mount instead of the named `autodoist_data` volume, either set `user: "<uid>:<gid>"` (e.g. `1026:100`) in `compose.yaml` or `chown -R 10001:10001 /path/to/data`.
 4. Start behind an HTTPS reverse proxy pointing at `127.0.0.1:8000`:
 
 ```bash
@@ -67,4 +67,4 @@ Incremental sync runs automatically inside the container every `sync.interval_mi
 docker exec autodoist python -m autodoist.sync_worker
 ```
 
-5. In Gemini (**Customize -> Connected Apps -> + Custom -> Cloud MCP**), add `https://your-domain.example/mcp` and complete the OIDC login flow. Once verified, set `jwt_audience` in `config.toml` to the `aud` claim issued by your OIDC provider.
+5. In Gemini (**Customize -> Connected Apps -> + Custom -> Cloud MCP**), add `https://your-domain.example/mcp` and complete the OIDC login flow.

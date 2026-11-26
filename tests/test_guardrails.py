@@ -734,12 +734,27 @@ async def test_capture_in_batch_dedup_and_mutation_input_guardrails(tmp_path: Pa
                     "items": [
                         {"content": "Call dentist", "project": "Personal"},
                         {"content": "  call   DENTIST ", "project": "Personal"},
+                        {"content": "Bought soap", "mode": "post_hoc", "project": "Personal"},
+                        {"content": "  bought   SOAP ", "mode": "post_hoc", "project": "Personal"},
                     ]
                 },
             )
             assert [c["content"] for c in res["created"]] == ["Call dentist"]
+            assert res["logged_post_hoc"] == [{"content": "Bought soap", "project": "Personal"}]
             assert res["skipped_duplicates"] == [
-                {"content": "call   DENTIST", "project": "Personal"}
+                {"content": "call   DENTIST", "project": "Personal"},
+                {"content": "bought   SOAP", "project": "Personal"},
+            ]
+
+            # Retrying the same post_hoc item in a follow-up call also skips duplicate
+            retry = await _call_json(
+                client,
+                "capture_items",
+                {"items": [{"content": "Bought soap", "mode": "post_hoc", "project": "Personal"}]},
+            )
+            assert retry["logged_post_hoc"] == []
+            assert retry["skipped_duplicates"] == [
+                {"content": "Bought soap", "project": "Personal"}
             ]
 
             with pytest.raises(ToolError, match="not allowed"):

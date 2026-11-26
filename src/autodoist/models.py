@@ -1,8 +1,13 @@
 from __future__ import annotations
 
+import re
 from typing import Any, Literal
 
 from pydantic import BaseModel, Field, field_validator
+
+
+def normalize_text(text: str) -> str:
+    return re.sub(r"\s+", " ", text.strip().lower())
 
 
 class TodoistDue(BaseModel):
