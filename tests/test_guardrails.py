@@ -456,6 +456,8 @@ def test_http_jwt_authz_discovery_and_removed_internal_sync(tmp_path: Path) -> N
     mcp = create_server(cfg, env, token_verifier=verifier)
     app = mcp.http_app(
         transport="streamable-http",
+        stateless_http=True,
+        json_response=True,
         middleware=build_http_middleware(cfg, env),
     )
 
@@ -496,7 +498,7 @@ def test_http_jwt_authz_discovery_and_removed_internal_sync(tmp_path: Path) -> N
         assert resp_403.status_code == 403
         assert resp_403.json()["error"] == "forbidden"
 
-        # Valid JWT for allowed sub passes auth & authz (reaches MCP handler)
+        # Valid JWT for allowed sub returns stateless JSON response (no SSE stream)
         allowed_jwt = _mint("sub-allowed")
         resp_ok = client.post(
             "/mcp",
@@ -504,9 +506,20 @@ def test_http_jwt_authz_discovery_and_removed_internal_sync(tmp_path: Path) -> N
                 "Authorization": f"Bearer {allowed_jwt}",
                 "Accept": "application/json, text/event-stream",
             },
-            json={"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {}},
+            json={
+                "jsonrpc": "2.0",
+                "id": 1,
+                "method": "initialize",
+                "params": {
+                    "protocolVersion": "2025-03-26",
+                    "capabilities": {},
+                    "clientInfo": {"name": "test", "version": "1.0"},
+                },
+            },
         )
-        assert resp_ok.status_code not in (401, 403)
+        assert resp_ok.status_code == 200
+        assert resp_ok.headers["content-type"].startswith("application/json")
+        assert resp_ok.json()["result"]["serverInfo"]["name"] == "autodoist"
 
         # /internal/sync is removed (sync runs in-process)
         assert client.post("/internal/sync").status_code == 404
@@ -734,3 +747,22 @@ async def test_capture_in_batch_dedup_and_mutation_input_guardrails(tmp_path: Pa
                 await client.call_tool("complete_task", {"task_id": "../bad"})
     finally:
         await todoist.aclose()
+
+
+def test_create_server_requires_todoist_token_and_health_checks_db(tmp_path: Path) -> None:
+    cfg, env = _make_config(tmp_path)
+    no_tok_env = EnvSettings(_env_file=None, todoist_api_token="", auth_disabled=True)
+    with pytest.raises(ValueError, match="TODOIST_API_TOKEN"):
+        create_server(cfg, no_tok_env)
+
+    class BrokenDB(Database):
+        def ping(self) -> None:
+            raise RuntimeError("disk I/O error")
+
+    broken_db = BrokenDB(cfg.storage.db_path)
+    mcp = create_server(cfg, env, db=broken_db)
+    app = mcp.http_app(transport="streamable-http", stateless_http=True, json_response=True)
+    with TestClient(app) as client:
+        resp = client.get("/health")
+        assert resp.status_code == 503
+        assert resp.json() == {"status": "unhealthy"}

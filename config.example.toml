@@ -1,5 +1,5 @@
 # Non-secret configuration for autodoist.
-# Override path via AUTODOIST_CONFIG env var if mounted elsewhere.
+# Copy to config.toml and customize. Override path via AUTODOIST_CONFIG env var.
 
 [storage]
 db_path = "data/autodoist.db"
@@ -26,3 +26,5 @@ capture_projects = ["Personal", "Household"]
 allowed_labels = ["errands", "home", "admin", "15min", "review"]
 synergy_labels = ["errands", "home", "admin", "15min"]
 review_label = "review"
+# IANA timezone used for overdue date comparisons (e.g. Europe/Budapest)
+timezone = "UTC"

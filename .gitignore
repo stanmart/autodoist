@@ -221,3 +221,6 @@ __marimo__/
 
 # Streamlit
 .streamlit/secrets.toml
+
+# Local runtime config (template tracked in config.example.toml)
+config.toml

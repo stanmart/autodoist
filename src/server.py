@@ -4,8 +4,9 @@ import asyncio
 import logging
 import re
 from contextlib import asynccontextmanager, suppress
-from datetime import UTC, date, datetime
+from datetime import date, datetime
 from typing import Annotated, Any, Literal
+from zoneinfo import ZoneInfo
 
 import uvicorn
 from fastmcp import FastMCP
@@ -19,7 +20,13 @@ from starlette.requests import Request
 from starlette.responses import JSONResponse
 from starlette.types import ASGIApp, Receive, Scope, Send
 
-from src.config import AppConfig, EnvSettings, load_config, validate_runtime_security
+from src.config import (
+    AppConfig,
+    EnvSettings,
+    load_config,
+    validate_runtime_security,
+    validate_todoist_token,
+)
 from src.db import Database
 from src.sync_worker import sync_loop
 from src.todoist import CaptureTaskInput, TodoistClient
@@ -161,6 +168,8 @@ def create_server(
     token_verifier: JWTVerifier | None = None,
 ) -> FastMCP:
     validate_runtime_security(app_config, env)
+    if todoist is None:
+        validate_todoist_token(env)
 
     database = db or Database(app_config.storage.db_path)
     database.init_db()
@@ -204,6 +213,11 @@ def create_server(
 
     @mcp.custom_route("/health", methods=["GET"])
     async def health(_request: Request) -> JSONResponse:
+        try:
+            await asyncio.to_thread(database.ping)
+        except Exception:
+            logger.exception("Health check failed")
+            return JSONResponse({"status": "unhealthy"}, status_code=503)
         return JSONResponse({"status": "ok"})
 
     @mcp.tool()
@@ -224,7 +238,7 @@ def create_server(
         project_id = await todoist_client.get_project_id(project) if project else None
         tasks = await todoist_client.get_active_tasks(project_id=project_id, label=label)
 
-        today_str = datetime.now(UTC).strftime("%Y-%m-%d")
+        today_str = datetime.now(ZoneInfo(rules.timezone)).strftime("%Y-%m-%d")
         groups: dict[str, list[dict[str, Any]]] = {lbl: [] for lbl in rules.synergy_labels}
         groups["untagged"] = []
 
@@ -364,9 +378,10 @@ def create_server(
             else None
         )
 
-        await todoist_client.ensure_projects_loaded()
         existing = await todoist_client.get_task(task_id)
-        current_project = todoist_client.get_project_name(str(existing.get("project_id") or ""))
+        current_project = await todoist_client.resolve_project_name(
+            str(existing.get("project_id") or "")
+        )
         if current_project not in allowed_projects_set:
             raise ValueError(
                 f"Task {task_id!r} belongs to project {current_project!r}, "
@@ -411,9 +426,10 @@ def create_server(
         """Mark a task completed in Todoist and immediately log it in completion_log."""
         _require_authorized_user(app_config, env)
         _validate_task_id(task_id)
-        await todoist_client.ensure_projects_loaded()
         existing = await todoist_client.get_task(task_id)
-        project_name = todoist_client.get_project_name(str(existing.get("project_id") or ""))
+        project_name = await todoist_client.resolve_project_name(
+            str(existing.get("project_id") or "")
+        )
         if project_name not in allowed_projects_set:
             raise ValueError(
                 f"Task {task_id!r} belongs to project {project_name!r}, "
@@ -462,6 +478,8 @@ def create_app() -> Any:
     mcp = create_server(app_config, env)
     return mcp.http_app(
         transport="streamable-http",
+        stateless_http=True,
+        json_response=True,
         middleware=build_http_middleware(app_config, env),
     )
 
@@ -472,6 +490,8 @@ def main() -> None:
         factory=True,
         host="0.0.0.0",
         port=8000,
+        proxy_headers=True,
+        forwarded_allow_ips="*",
     )
 
 

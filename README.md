@@ -12,12 +12,12 @@ A lean MCP server and mini-backend sitting between an MCP client (e.g. **Gemini*
 
 ## Configuration
 
-Non-secret settings live in [config.toml](config.toml) (`AUTODOIST_CONFIG` overrides the path):
+Non-secret settings live in `config.toml` (copy from [config.example.toml](config.example.toml); `AUTODOIST_CONFIG` overrides the path):
 
 - `[storage]`: `db_path` (default `data/autodoist.db`)
 - `[auth]`: `mcp_base_url`, `oidc_issuer`, optional `oidc_jwks_uri`, `jwt_algorithm` (default `RS256`), optional `jwt_audience`, `allowed_user_subs`
 - `[sync]`: `interval_minutes` (default `30`; `0` disables background sync)
-- `[rules]`: `allowed_projects`, `capture_projects`, `allowed_labels`, `synergy_labels`, `review_label`
+- `[rules]`: `allowed_projects`, `capture_projects`, `allowed_labels`, `synergy_labels`, `review_label`, `timezone` (default `UTC`)
 
 Secrets live in `.env` (see [.env.example](.env.example)):
 
@@ -28,6 +28,7 @@ Secrets live in `.env` (see [.env.example](.env.example)):
 
 ```bash
 uv sync
+cp config.example.toml config.toml
 cp .env.example .env
 # Set TODOIST_API_TOKEN and AUTH_DISABLED=true in .env for local testing
 uv run uvicorn src.server:create_app --factory --reload --port 8000
@@ -47,11 +48,14 @@ uv run ruff check .
 uv run pyrefly check
 ```
 
-## Docker Compose Deployment
+## Docker Compose Deployment (VPS / Synology NAS)
+
+The HTTP server runs in stateless JSON response mode (`stateless_http=True, json_response=True`) so it works cleanly behind Synology DSM's Nginx reverse proxy without SSE buffering issues or session drops across container restarts.
 
 1. Copy `.env.example` to `.env` and set `TODOIST_API_TOKEN`.
-2. Edit `config.toml` with your `mcp_base_url`, `oidc_issuer` (plus `oidc_jwks_uri` if your provider does not use `/.well-known/jwks.json`), and `allowed_user_subs`.
-3. Start behind an HTTPS reverse proxy pointing at `127.0.0.1:8000`:
+2. Copy `config.example.toml` to `config.toml` and set `mcp_base_url`, `oidc_issuer` (plus `oidc_jwks_uri` if your provider does not use `/.well-known/jwks.json`), `allowed_user_subs`, and `rules.timezone`.
+3. Ensure `config.toml` is readable by container UID `10001` (`chmod 644 config.toml`). If you replace the named `autodoist_data` volume with a host bind mount (e.g. on Synology), `chown -R 10001:10001 /path/to/data`.
+4. Start behind an HTTPS reverse proxy pointing at `127.0.0.1:8000`:
 
 ```bash
 docker compose up -d
@@ -63,4 +67,4 @@ Incremental sync runs automatically inside the container every `sync.interval_mi
 docker exec autodoist python -m src.sync_worker
 ```
 
-4. In Gemini (**Customize -> Connected Apps -> + Custom -> Cloud MCP**), add `https://your-domain.example/mcp` and complete the OIDC login flow. Once verified, set `jwt_audience` in `config.toml` to the `aud` claim issued by your OIDC provider.
+5. In Gemini (**Customize -> Connected Apps -> + Custom -> Cloud MCP**), add `https://your-domain.example/mcp` and complete the OIDC login flow. Once verified, set `jwt_audience` in `config.toml` to the `aud` claim issued by your OIDC provider.

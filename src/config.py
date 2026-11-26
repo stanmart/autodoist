@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import tomllib
 from pathlib import Path
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
@@ -85,6 +86,19 @@ class RulesConfig(BaseModel):
     allowed_labels: list[str] = Field(min_length=1)
     synergy_labels: list[str] = Field(default_factory=list)
     review_label: str = Field(min_length=1)
+    timezone: str = "UTC"
+
+    @field_validator("timezone", mode="before")
+    @classmethod
+    def validate_timezone(cls, value: object) -> object:
+        if isinstance(value, str):
+            tz_name = value.strip()
+            try:
+                ZoneInfo(tz_name)
+            except ZoneInfoNotFoundError as exc:
+                raise ValueError(f"Invalid IANA timezone: {value!r}") from exc
+            return tz_name
+        return value
 
     @field_validator(
         "allowed_projects",
@@ -189,6 +203,12 @@ def validate_runtime_security(app_config: AppConfig, env: EnvSettings) -> None:
         raise ValueError(
             "auth.allowed_user_subs must contain at least one sub when AUTH_DISABLED is false"
         )
+
+
+def validate_todoist_token(env: EnvSettings) -> None:
+    """Fail fast if Todoist API token is missing."""
+    if not env.todoist_api_token.strip():
+        raise ValueError("TODOIST_API_TOKEN must be set")
 
 
 def load_config() -> tuple[AppConfig, EnvSettings]:

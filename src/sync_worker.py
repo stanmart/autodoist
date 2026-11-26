@@ -9,7 +9,7 @@ from typing import Any
 
 import httpx
 
-from src.config import load_config
+from src.config import load_config, validate_todoist_token
 from src.db import CompletionRecord, Database, normalize_timestamp, parse_utc_timestamp
 from src.todoist import TodoistClient
 
@@ -126,8 +126,7 @@ async def sync_loop(
 
 async def _run_cli() -> None:
     app_config, env = load_config()
-    if not env.todoist_api_token.strip():
-        raise ValueError("TODOIST_API_TOKEN must be set")
+    validate_todoist_token(env)
     db = Database(app_config.storage.db_path)
     db.init_db()
     todoist = TodoistClient(env.todoist_api_token)
