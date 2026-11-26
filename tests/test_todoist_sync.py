@@ -432,11 +432,11 @@ async def test_project_cache_eviction_rename_and_mid_lifetime_refresh(
     try:
         # Warm cache with only p1, then test rename/archive eviction directly
         assert await client.get_project_id("Personal") == "p1"
+        client.update_projects_cache([{"id": "p1", "name": "PersonalRenamed"}])
+        assert client.get_project_name("p1") == "PersonalRenamed"
+        assert "Personal" not in client._name_to_id
         client.update_projects_cache(
-            [
-                {"id": "p1", "name": "PersonalRenamed"},
-                {"id": "p1", "name": "PersonalRenamed", "is_archived": True},
-            ]
+            [{"id": "p1", "name": "PersonalRenamed", "is_archived": True}]
         )
         assert client.get_project_name("p1") is None
 

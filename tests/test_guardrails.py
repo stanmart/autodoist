@@ -722,8 +722,10 @@ async def test_capture_in_batch_dedup_and_mutation_input_guardrails(tmp_path: Pa
                     },
                 )
             ).data
-            assert len(res["created"]) == 1
-            assert len(res["skipped_duplicates"]) == 1
+            assert [c["content"] for c in res["created"]] == ["Call dentist"]
+            assert res["skipped_duplicates"] == [
+                {"content": "call   DENTIST", "project": "Personal"}
+            ]
 
             with pytest.raises(ToolError, match="not allowed"):
                 await client.call_tool(
