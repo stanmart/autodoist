@@ -67,6 +67,8 @@ class TodoistClient:
         )
         self._projects_ttl_seconds = projects_ttl_seconds
         self._projects_loaded_at = 0.0
+        self._projects_fully_loaded = False
+        self._missing_project_ids: set[str] = set()
         self._name_to_id: dict[str, str] = {}
         self._id_to_name: dict[str, str] = {}
 
@@ -88,10 +90,11 @@ class TodoistClient:
                 self._name_to_id.pop(old_name, None)
             self._name_to_id[name] = pid
             self._id_to_name[pid] = name
+            self._missing_project_ids.discard(pid)
 
     async def ensure_projects_loaded(self, *, force_refresh: bool = False) -> bool:
         cache_expired = (time.monotonic() - self._projects_loaded_at) >= self._projects_ttl_seconds
-        if self._name_to_id and not force_refresh and not cache_expired:
+        if self._projects_fully_loaded and not force_refresh and not cache_expired:
             return False
         projects: list[dict[str, Any]] = []
         cursor: str | None = None
@@ -108,7 +111,9 @@ class TodoistClient:
                 break
         self._name_to_id.clear()
         self._id_to_name.clear()
+        self._missing_project_ids.clear()
         self.update_projects_cache(projects)
+        self._projects_fully_loaded = True
         self._projects_loaded_at = time.monotonic()
         return True
 
@@ -128,9 +133,11 @@ class TodoistClient:
             return None
         refreshed = await self.ensure_projects_loaded()
         name = self._id_to_name.get(project_id)
-        if name is None and not refreshed:
+        if name is None and not refreshed and project_id not in self._missing_project_ids:
             await self.ensure_projects_loaded(force_refresh=True)
             name = self._id_to_name.get(project_id)
+        if name is None:
+            self._missing_project_ids.add(project_id)
         return name
 
     async def get_active_tasks(
@@ -290,7 +297,9 @@ class TodoistClient:
         data = dict(resp.json())
         if "projects" in data and isinstance(data["projects"], list):
             self.update_projects_cache(data["projects"])
-            self._projects_loaded_at = time.monotonic()
+            if sync_token == "*" or self._projects_fully_loaded:
+                self._projects_fully_loaded = True
+                self._projects_loaded_at = time.monotonic()
         return data
 
     async def get_completed_activities(

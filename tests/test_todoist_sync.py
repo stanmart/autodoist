@@ -524,3 +524,42 @@ async def test_sync_loop_recovers_from_transient_error_and_cancels_cleanly(
         with pytest.raises(asyncio.CancelledError):
             await task
         await client.aclose()
+
+
+@respx.mock
+async def test_partial_sync_delta_does_not_poison_cold_project_cache() -> None:
+    respx.post(f"{TODOIST_API_V1_BASE}/sync").mock(
+        return_value=httpx.Response(
+            200,
+            json={
+                "sync_token": "tok-delta",
+                "projects": [{"id": "p2", "name": "Household"}],
+                "items": [],
+            },
+        )
+    )
+    projects_route = respx.get(f"{TODOIST_API_V1_BASE}/projects").mock(
+        return_value=httpx.Response(
+            200,
+            json={
+                "results": [
+                    {"id": "p1", "name": "Personal"},
+                    {"id": "p2", "name": "Household"},
+                ],
+                "next_cursor": None,
+            },
+        )
+    )
+
+    client = TodoistClient("test-token", projects_ttl_seconds=600.0)
+    try:
+        # Incremental sync with partial projects delta must not skip full /projects load
+        await client.sync_incremental("tok-existing")
+        assert await client.resolve_project_name("p1") == "Personal"
+        # Repeated misses for deleted project ID must not keep calling /projects
+        assert await client.resolve_project_name("p-deleted") is None
+        assert await client.resolve_project_name("p-deleted") is None
+    finally:
+        await client.aclose()
+
+    assert projects_route.call_count == 2
