@@ -94,10 +94,6 @@ def build_auth_provider(
         return None
     issuer = app_config.auth.oidc_issuer
     jwks_uri = app_config.auth.oidc_jwks_uri or f"{issuer}/.well-known/jwks.json"
-    if app_config.auth.jwt_audience is None and token_verifier is None:
-        logger.warning(
-            "auth.jwt_audience is unset; set it once your client/OIDC provider aud is verified"
-        )
     verifier = token_verifier or JWTVerifier(
         jwks_uri=jwks_uri,
         issuer=issuer,

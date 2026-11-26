@@ -14,7 +14,7 @@ from autodoist.config import (
     validate_runtime_security,
     validate_todoist_token,
 )
-from autodoist.db import CompletionRecord, Database
+from autodoist.db import CompletionRecord, Database, normalize_timestamp
 
 
 def test_app_config_loads_default_toml() -> None:
@@ -69,6 +69,7 @@ def test_runtime_security_fails_closed() -> None:
         auth=AuthConfig(
             mcp_base_url="https://mcp.example.com/",
             oidc_issuer="https://id.example.com/",
+            jwt_audience="https://mcp.example.com",
             allowed_user_subs=frozenset(),
         ),
         rules=rules,
@@ -80,9 +81,21 @@ def test_runtime_security_fails_closed() -> None:
     with pytest.raises(ValueError, match="allowed_user_subs"):
         validate_runtime_security(cfg_no_subs, prod_env)
 
+    cfg_no_aud = AppConfig(
+        auth=AuthConfig(
+            mcp_base_url="https://mcp.example.com",
+            oidc_issuer="https://id.example.com",
+            allowed_user_subs=["user-1"],
+        ),
+        rules=rules,
+    )
+    with pytest.raises(ValueError, match="jwt_audience"):
+        validate_runtime_security(cfg_no_aud, prod_env)
+
     cfg_no_issuer = AppConfig(
         auth=AuthConfig(
             mcp_base_url="https://mcp.example.com",
+            jwt_audience="https://mcp.example.com",
             allowed_user_subs=["user-1"],
         ),
         rules=rules,
@@ -94,6 +107,7 @@ def test_runtime_security_fails_closed() -> None:
         auth=AuthConfig(
             mcp_base_url="https://mcp.example.com",
             oidc_issuer="https://id.example.com",
+            jwt_audience="https://mcp.example.com",
             allowed_user_subs=["user-1", " user-2 "],
         ),
         rules=rules,
@@ -189,13 +203,14 @@ def test_db_sync_state_and_completion_dedup(tmp_path: Path) -> None:
         )
 
 
-def test_db_stores_multiple_recurring_completions_with_same_task_id(tmp_path: Path) -> None:
+def test_db_reconciles_mcp_complete_and_checks_recent_post_hoc(tmp_path: Path) -> None:
     db = Database(tmp_path / "rec.db")
     db.init_db()
     db.ping()
     now = datetime.now(UTC)
+    server_ts = now + timedelta(seconds=3)
 
-    # Batch insert with +-60s dedup tolerance (2s apart deduplicates, 7 days apart keeps both)
+    # Initial mcp_complete row + older recurring row, followed by authoritative todoist_sync
     inserted = db.record_completions(
         [
             CompletionRecord(
@@ -216,13 +231,108 @@ def test_db_stores_multiple_recurring_completions_with_same_task_id(tmp_path: Pa
                 todoist_task_id="rec-1",
                 content="Water plants",
                 project_name="Household",
-                completed_at=now + timedelta(seconds=2),
+                completed_at=server_ts,
                 source="todoist_sync",
             ),
         ]
     )
     assert inserted == 2
-    assert len(db.get_completion_history(days=30)) == 2
+    history = db.get_completion_history(days=30)
+    assert len(history) == 2
+    # Reconciled row carries Todoist's authoritative server timestamp
+    assert history[0].completed_at == normalize_timestamp(server_ts)
+
+    # Distinct todoist_sync timestamps (without mcp_complete) are NOT suppressed by heuristic
+    assert (
+        db.record_completion(
+            todoist_task_id="rec-2",
+            content="Stretch",
+            project_name="Personal",
+            completed_at=now,
+            source="todoist_sync",
+        )
+        is True
+    )
+    assert (
+        db.record_completion(
+            todoist_task_id="rec-2",
+            content="Stretch",
+            project_name="Personal",
+            completed_at=now + timedelta(seconds=10),
+            source="todoist_sync",
+        )
+        is True
+    )
+
+    # Same-second mcp_complete + todoist_sync preserves row and reconciles source
+    assert (
+        db.record_completion(
+            todoist_task_id="rec-same-sec",
+            content="Take pill",
+            project_name="Personal",
+            completed_at=now,
+            source="mcp_complete",
+        )
+        is True
+    )
+    assert (
+        db.record_completion(
+            todoist_task_id="rec-same-sec",
+            content="Take pill",
+            project_name="Personal",
+            completed_at=now,
+            source="todoist_sync",
+        )
+        is False
+    )
+    assert [
+        h.content for h in db.get_completion_history(days=30, project="Personal")
+    ].count("Take pill") == 1
+
+    # Separate todoist_sync row at ts + mcp_complete within +-60s deletes stale mcp_complete
+    db.record_completion(
+        todoist_task_id="rec-pre",
+        content="Pre-existing sync",
+        project_name="Personal",
+        completed_at=now - timedelta(hours=1),
+        source="todoist_sync",
+    )
+    db.record_completion(
+        todoist_task_id="rec-pre",
+        content="Pre-existing sync",
+        project_name="Personal",
+        completed_at=now - timedelta(hours=1, seconds=5),
+        source="mcp_complete",
+    )
+    db.record_completion(
+        todoist_task_id="rec-pre",
+        content="Pre-existing sync",
+        project_name="Personal",
+        completed_at=now - timedelta(hours=1),
+        source="todoist_sync",
+    )
+    assert [
+        h.content for h in db.get_completion_history(days=30, project="Personal")
+    ].count("Pre-existing sync") == 1
+
+    # Post-hoc recent duplicate lookup normalizes case/whitespace and respects window
+    db.record_completion(
+        todoist_task_id=None,
+        content="Bought diapers",
+        project_name="Household",
+        completed_at=now - timedelta(seconds=30),
+        source="post_hoc_log",
+    )
+    db.record_completion(
+        todoist_task_id=None,
+        content="Old milk",
+        project_name="Household",
+        completed_at=now - timedelta(minutes=10),
+        source="post_hoc_log",
+    )
+    assert db.has_recent_post_hoc("  bought   DIAPERS ", "Household", within_seconds=300) is True
+    assert db.has_recent_post_hoc("bought diapers", "Personal", within_seconds=300) is False
+    assert db.has_recent_post_hoc("old milk", "Household", within_seconds=300) is False
 
 
 def test_auth_audience_list_jwks_and_algorithm_validation() -> None:

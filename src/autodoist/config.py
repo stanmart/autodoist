@@ -199,6 +199,8 @@ def validate_runtime_security(app_config: AppConfig, env: EnvSettings) -> None:
         raise ValueError("auth.mcp_base_url must be set when AUTH_DISABLED is false")
     if not app_config.auth.oidc_issuer:
         raise ValueError("auth.oidc_issuer must be set when AUTH_DISABLED is false")
+    if not app_config.auth.jwt_audience:
+        raise ValueError("auth.jwt_audience must be set when AUTH_DISABLED is false")
     if not app_config.auth.allowed_user_subs:
         raise ValueError(
             "auth.allowed_user_subs must contain at least one sub when AUTH_DISABLED is false"

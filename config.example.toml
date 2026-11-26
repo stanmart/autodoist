@@ -11,8 +11,8 @@ oidc_issuer = "https://id.example.com"
 # oidc_jwks_uri = ""
 # Asymmetric JWT signing algorithm (e.g. RS256, ES256)
 # jwt_algorithm = "RS256"
-# Optional expected JWT audience (string or list of strings; recommended once verified)
-# jwt_audience = ""
+# Required expected JWT audience when AUTH_DISABLED=false (string or list of strings)
+jwt_audience = "https://todoist-mcp.example.com"
 # OIDC `sub` user IDs allowed to access the MCP server
 allowed_user_subs = []
 

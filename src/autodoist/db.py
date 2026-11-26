@@ -9,7 +9,7 @@ from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Literal
 
-from autodoist.models import CompletionHistoryItem
+from autodoist.models import CompletionHistoryItem, normalize_text
 
 CompletionSource = Literal["todoist_sync", "post_hoc_log", "mcp_complete"]
 
@@ -124,18 +124,43 @@ class Database:
                     datetime.now(UTC) if rec.completed_at is None else rec.completed_at
                 )
                 ts = dt.strftime("%Y-%m-%dT%H:%M:%SZ")
-                if rec.todoist_task_id is not None:
+                if rec.source == "todoist_sync" and rec.todoist_task_id is not None:
                     low = (dt - timedelta(seconds=60)).strftime("%Y-%m-%dT%H:%M:%SZ")
                     high = (dt + timedelta(seconds=60)).strftime("%Y-%m-%dT%H:%M:%SZ")
-                    exists = conn.execute(
+                    mcp_row = conn.execute(
                         """
-                        SELECT 1 FROM completion_log
-                        WHERE todoist_task_id = ? AND completed_at BETWEEN ? AND ?
+                        SELECT id FROM completion_log
+                        WHERE todoist_task_id = ?
+                          AND source = 'mcp_complete'
+                          AND completed_at BETWEEN ? AND ?
+                        ORDER BY id ASC
                         LIMIT 1
                         """,
                         (rec.todoist_task_id, low, high),
                     ).fetchone()
-                    if exists is not None:
+                    if mcp_row is not None:
+                        existing_exact = conn.execute(
+                            """
+                            SELECT 1 FROM completion_log
+                            WHERE todoist_task_id = ? AND completed_at = ? AND id != ?
+                            LIMIT 1
+                            """,
+                            (rec.todoist_task_id, ts, mcp_row["id"]),
+                        ).fetchone()
+                        if existing_exact is not None:
+                            conn.execute(
+                                "DELETE FROM completion_log WHERE id = ?",
+                                (mcp_row["id"],),
+                            )
+                        else:
+                            conn.execute(
+                                """
+                                UPDATE completion_log
+                                SET completed_at = ?, source = 'todoist_sync'
+                                WHERE id = ?
+                                """,
+                                (ts, mcp_row["id"]),
+                            )
                         continue
 
                 labels_json = json.dumps(sorted(set(rec.labels or [])))
@@ -157,6 +182,27 @@ class Database:
                 if cur.rowcount == 1:
                     inserted += 1
         return inserted
+
+    def has_recent_post_hoc(
+        self,
+        content: str,
+        project_name: str,
+        *,
+        within_seconds: int = 300,
+    ) -> bool:
+        target = normalize_text(content)
+        since = normalize_timestamp(datetime.now(UTC) - timedelta(seconds=within_seconds))
+        with self._connect() as conn:
+            rows = conn.execute(
+                """
+                SELECT content FROM completion_log
+                WHERE source = 'post_hoc_log'
+                  AND project_name = ?
+                  AND completed_at >= ?
+                """,
+                (project_name, since),
+            ).fetchall()
+        return any(normalize_text(str(row["content"])) == target for row in rows)
 
     def record_completion(
         self,
