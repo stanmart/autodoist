@@ -16,7 +16,7 @@ from fastmcp.exceptions import ToolError
 from fastmcp.server.auth.providers.jwt import JWTVerifier
 from starlette.testclient import TestClient
 
-from src.config import AppConfig, AuthConfig, EnvSettings, RulesConfig, StorageConfig
+from src.config import AppConfig, AuthConfig, EnvSettings, RulesConfig, StorageConfig, SyncConfig
 from src.db import Database
 from src.server import build_http_middleware, create_server
 from src.todoist import TODOIST_API_V1_BASE, TodoistClient
@@ -28,7 +28,7 @@ def _make_config(
     auth_disabled: bool = True,
     allowed_user_subs: frozenset[str] = frozenset({"sub-allowed"}),
     jwt_audience: str | list[str] | None = "https://mcp.example.com",
-    sync_secret: str = "sync-secret-123",
+    sync_interval_minutes: int = 0,
 ) -> tuple[AppConfig, EnvSettings]:
     cfg = AppConfig(
         storage=StorageConfig(db_path=str(tmp_path / "autodoist.db")),
@@ -38,6 +38,7 @@ def _make_config(
             jwt_audience=jwt_audience,
             allowed_user_subs=allowed_user_subs,
         ),
+        sync=SyncConfig(interval_minutes=sync_interval_minutes),
         rules=RulesConfig(
             allowed_projects=["Inbox", "Personal", "Household"],
             capture_projects=["Personal", "Household"],
@@ -49,7 +50,6 @@ def _make_config(
     env = EnvSettings(
         _env_file=None,
         todoist_api_token="test-token",
-        sync_secret=sync_secret,
         auth_disabled=auth_disabled,
     )
     return cfg, env
@@ -438,8 +438,7 @@ async def test_complete_task_and_history_project_isolation(tmp_path: Path) -> No
     assert close_route.called
 
 
-@respx.mock
-def test_http_jwt_authz_discovery_and_internal_sync_secret(tmp_path: Path) -> None:
+def test_http_jwt_authz_discovery_and_removed_internal_sync(tmp_path: Path) -> None:
     private_key, public_pem = _generate_rsa_keypair()
     cfg, env = _make_config(
         tmp_path,
@@ -452,18 +451,6 @@ def test_http_jwt_authz_discovery_and_internal_sync_secret(tmp_path: Path) -> No
         issuer="https://id.example.com",
         audience="https://mcp.example.com",
         algorithm="RS256",
-    )
-
-    respx.post(f"{TODOIST_API_V1_BASE}/sync").mock(
-        return_value=httpx.Response(200, json={"sync_token": "t-1", "items": [], "projects": []})
-    )
-    respx.get(f"{TODOIST_API_V1_BASE}/projects").mock(
-        return_value=httpx.Response(
-            200, json={"results": [{"id": "p1", "name": "Personal"}], "next_cursor": None}
-        )
-    )
-    respx.get(f"{TODOIST_API_V1_BASE}/tasks/completed/by_completion_date").mock(
-        return_value=httpx.Response(200, json={"items": [], "next_cursor": None})
     )
 
     mcp = create_server(cfg, env, token_verifier=verifier)
@@ -521,14 +508,8 @@ def test_http_jwt_authz_discovery_and_internal_sync_secret(tmp_path: Path) -> No
         )
         assert resp_ok.status_code not in (401, 403)
 
-        # /internal/sync secret checks
-        assert client.post("/internal/sync").status_code == 403
-        assert (
-            client.post("/internal/sync", headers={"X-Sync-Secret": "wrong"}).status_code == 403
-        )
-        ok_sync = client.post("/internal/sync", headers={"X-Sync-Secret": "sync-secret-123"})
-        assert ok_sync.status_code == 200
-        assert ok_sync.json()["status"] == "ok"
+        # /internal/sync is removed (sync runs in-process)
+        assert client.post("/internal/sync").status_code == 404
 
         # Expired and wrong-issuer JWTs return 401
         expired = jwt.encode(
@@ -562,22 +543,34 @@ def test_http_jwt_authz_discovery_and_internal_sync_secret(tmp_path: Path) -> No
         )
 
 
-def test_internal_sync_returns_503_when_sync_secret_unset_and_handles_non_ascii_secret(
-    tmp_path: Path,
-) -> None:
-    cfg, env = _make_config(tmp_path, auth_disabled=True, sync_secret="")
-    mcp = create_server(cfg, env)
-    app = mcp.http_app(transport="streamable-http")
-    with TestClient(app) as client:
-        resp = client.post("/internal/sync", headers={"X-Sync-Secret": "anything"})
-        assert resp.status_code == 503
-        assert resp.json()["error"] == "sync_secret_not_configured"
+@respx.mock
+def test_server_lifespan_runs_background_sync_and_cancels_cleanly(tmp_path: Path) -> None:
+    respx.post(f"{TODOIST_API_V1_BASE}/sync").mock(
+        return_value=httpx.Response(
+            200,
+            json={
+                "sync_token": "tok-bg",
+                "projects": [{"id": "p1", "name": "Personal"}],
+                "items": [],
+            },
+        )
+    )
+    respx.get(f"{TODOIST_API_V1_BASE}/tasks/completed/by_completion_date").mock(
+        return_value=httpx.Response(200, json={"items": [], "next_cursor": None})
+    )
 
-    cfg_utf8, env_utf8 = _make_config(tmp_path, auth_disabled=True, sync_secret="secret-é")
-    mcp_utf8 = create_server(cfg_utf8, env_utf8)
-    with TestClient(mcp_utf8.http_app(transport="streamable-http")) as client_utf8:
-        resp_403 = client_utf8.post("/internal/sync", headers={"X-Sync-Secret": "wrong"})
-        assert resp_403.status_code == 403
+    cfg, env = _make_config(tmp_path, auth_disabled=True, sync_interval_minutes=30)
+    db = Database(cfg.storage.db_path)
+    mcp = create_server(cfg, env, db=db)
+    app = mcp.http_app(transport="streamable-http")
+
+    with TestClient(app) as client:
+        assert client.get("/health").status_code == 200
+        for _ in range(50):
+            if db.get_sync_state()[0] == "tok-bg":
+                break
+            time.sleep(0.01)
+    assert db.get_sync_state()[0] == "tok-bg"
 
 
 async def test_tool_level_authz_blocks_unauthenticated_context(tmp_path: Path) -> None:

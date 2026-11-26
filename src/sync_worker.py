@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import asyncio
+import json
 import logging
 from collections.abc import Iterable
 from datetime import UTC, datetime, timedelta
@@ -7,6 +9,7 @@ from typing import Any
 
 import httpx
 
+from src.config import load_config
 from src.db import Database
 from src.todoist import TodoistClient
 
@@ -123,3 +126,46 @@ async def run_sync(
         "sync_token_updated": bool(raw_new_token) and str(raw_new_token) != sync_token,
         "completed_endpoint_ok": completed_endpoint_ok,
     }
+
+
+async def sync_loop(
+    db: Database,
+    todoist: TodoistClient,
+    allowed_projects: Iterable[str],
+    interval_seconds: float,
+) -> None:
+    """Run incremental sync immediately and then periodically until cancelled."""
+    if interval_seconds <= 0:
+        raise ValueError("interval_seconds must be positive")
+    projects = tuple(allowed_projects)
+    while True:
+        try:
+            summary = await run_sync(db, todoist, projects)
+            logger.info("Periodic sync completed: %s", summary)
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            logger.exception("Periodic sync failed; will retry on next interval")
+        await asyncio.sleep(interval_seconds)
+
+
+async def _run_cli() -> None:
+    app_config, env = load_config()
+    if not env.todoist_api_token.strip():
+        raise ValueError("TODOIST_API_TOKEN must be set")
+    db = Database(app_config.storage.db_path)
+    db.init_db()
+    todoist = TodoistClient(env.todoist_api_token)
+    try:
+        summary = await run_sync(db, todoist, app_config.rules.allowed_projects)
+    finally:
+        await todoist.aclose()
+    print(json.dumps(summary))
+
+
+def main() -> None:
+    asyncio.run(_run_cli())
+
+
+if __name__ == "__main__":
+    main()

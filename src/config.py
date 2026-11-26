@@ -137,6 +137,12 @@ class RulesConfig(BaseModel):
         return self
 
 
+class SyncConfig(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    interval_minutes: int = Field(default=30, ge=0)
+
+
 class AppConfig(BaseModel):
     """All non-secret configuration loaded from config.toml."""
 
@@ -144,6 +150,7 @@ class AppConfig(BaseModel):
 
     storage: StorageConfig = Field(default_factory=StorageConfig)
     auth: AuthConfig = Field(default_factory=AuthConfig)
+    sync: SyncConfig = Field(default_factory=SyncConfig)
     rules: RulesConfig
 
     @classmethod
@@ -166,13 +173,12 @@ class EnvSettings(BaseSettings):
     )
 
     todoist_api_token: str = ""
-    sync_secret: str = ""
     autodoist_config: str = "config.toml"
     auth_disabled: bool = False
 
 
 def validate_runtime_security(app_config: AppConfig, env: EnvSettings) -> None:
-    """Fail closed if production auth or sync settings are incomplete."""
+    """Fail closed if production auth settings are incomplete."""
     if env.auth_disabled:
         return
     if not app_config.auth.mcp_base_url:
@@ -183,8 +189,6 @@ def validate_runtime_security(app_config: AppConfig, env: EnvSettings) -> None:
         raise ValueError(
             "auth.allowed_user_subs must contain at least one sub when AUTH_DISABLED is false"
         )
-    if not env.sync_secret.strip():
-        raise ValueError("SYNC_SECRET must be set when AUTH_DISABLED is false")
 
 
 def load_config() -> tuple[AppConfig, EnvSettings]:
