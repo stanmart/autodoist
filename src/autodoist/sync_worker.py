@@ -9,9 +9,9 @@ from typing import Any
 
 import httpx
 
-from src.config import load_config, validate_todoist_token
-from src.db import CompletionRecord, Database, normalize_timestamp, parse_utc_timestamp
-from src.todoist import TodoistClient
+from autodoist.config import load_config, validate_todoist_token
+from autodoist.db import CompletionRecord, Database, normalize_timestamp, parse_utc_timestamp
+from autodoist.todoist import TodoistClient
 
 logger = logging.getLogger(__name__)
 
@@ -25,27 +25,26 @@ async def run_sync(
     allowed_set = set(allowed_projects)
     sync_token, last_synced_at = await asyncio.to_thread(db.get_sync_state)
 
-    sync_data = await todoist.sync_incremental(sync_token)
-    await todoist.ensure_projects_loaded()
+    await todoist.refresh_projects(force=True)
+    new_token, items = await todoist.sync_incremental(sync_token)
 
     now = datetime.now(UTC)
     now_iso = normalize_timestamp(now)
     records: list[CompletionRecord] = []
 
-    for item in sync_data.get("items") or []:
-        if item.get("is_deleted") or not item.get("checked"):
+    for item in items:
+        if item.is_deleted or not item.checked:
             continue
-        project_id = str(item.get("project_id") or "")
-        project_name = await todoist.resolve_project_name(project_id)
+        project_name = todoist.get_project_name(item.project_id)
         if project_name not in allowed_set:
             continue
         records.append(
             CompletionRecord(
-                todoist_task_id=str(item["id"]),
-                content=str(item.get("content") or ""),
+                todoist_task_id=item.id,
+                content=item.content,
                 project_name=project_name,
-                labels=[str(lbl) for lbl in (item.get("labels") or [])],
-                completed_at=item.get("completed_at") or now_iso,
+                labels=item.labels,
+                completed_at=item.completed_at or now_iso,
                 source="todoist_sync",
             )
         )
@@ -72,33 +71,26 @@ async def run_sync(
             raise
 
     for event in events:
-        extra = event.get("extra_data") or {}
-        task_id = event.get("object_id") or extra.get("item_id")
-        if not task_id:
-            continue
-        project_id = str(event.get("parent_project_id") or extra.get("project_id") or "")
-        project_name = await todoist.resolve_project_name(project_id)
+        project_name = todoist.get_project_name(event.project_id)
         if project_name not in allowed_set:
             continue
         records.append(
             CompletionRecord(
-                todoist_task_id=str(task_id),
-                content=str(extra.get("content") or event.get("content") or ""),
+                todoist_task_id=event.task_id,
+                content=event.content,
                 project_name=project_name,
                 labels=[],
-                completed_at=event.get("event_date") or now_iso,
+                completed_at=event.completed_at or now_iso,
                 source="todoist_sync",
             )
         )
 
     inserted = await asyncio.to_thread(db.record_completions, records)
-    raw_new_token = sync_data.get("sync_token")
-    new_token = str(raw_new_token) if raw_new_token else sync_token
     await asyncio.to_thread(db.update_sync_state, new_token, now)
 
     return {
         "inserted_completions": inserted,
-        "sync_token_updated": bool(raw_new_token) and str(raw_new_token) != sync_token,
+        "sync_token_updated": new_token != sync_token,
         "activities_endpoint_ok": activities_endpoint_ok,
     }
 

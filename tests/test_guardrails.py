@@ -4,6 +4,7 @@ import json
 import time
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
+from typing import Any
 
 import httpx
 import jwt
@@ -16,10 +17,17 @@ from fastmcp.exceptions import ToolError
 from fastmcp.server.auth.providers.jwt import JWTVerifier
 from starlette.testclient import TestClient
 
-from src.config import AppConfig, AuthConfig, EnvSettings, RulesConfig, StorageConfig, SyncConfig
-from src.db import Database
-from src.server import build_http_middleware, create_server
-from src.todoist import TODOIST_API_V1_BASE, TodoistClient
+from autodoist.config import (
+    AppConfig,
+    AuthConfig,
+    EnvSettings,
+    RulesConfig,
+    StorageConfig,
+    SyncConfig,
+)
+from autodoist.db import Database
+from autodoist.server import build_http_middleware, create_server
+from autodoist.todoist import TODOIST_API_V1_BASE, TodoistClient
 
 
 def _make_config(
@@ -62,6 +70,12 @@ def _generate_rsa_keypair() -> tuple[rsa.RSAPrivateKey, str]:
         format=serialization.PublicFormat.SubjectPublicKeyInfo,
     )
     return private_key, public_pem.decode("utf-8")
+
+
+async def _call_json(client: Client, name: str, args: dict[str, Any]) -> dict[str, Any]:
+    res = await client.call_tool(name, args)
+    assert res.structured_content is not None
+    return res.structured_content
 
 
 async def test_only_five_safe_tools_are_registered(tmp_path: Path) -> None:
@@ -155,7 +169,8 @@ async def test_capture_items_guardrails_review_tag_duplicates_and_post_hoc(
                     },
                 )
 
-            res = await client.call_tool(
+            data = await _call_json(
+                client,
                 "capture_items",
                 {
                     "items": [
@@ -181,7 +196,6 @@ async def test_capture_items_guardrails_review_tag_duplicates_and_post_hoc(
                     ]
                 },
             )
-            data = res.data
             assert len(data["created"]) == 1
             assert data["created"][0]["content"] == "Fix hinge"
             assert data["skipped_duplicates"] == [
@@ -192,8 +206,8 @@ async def test_capture_items_guardrails_review_tag_duplicates_and_post_hoc(
             ]
 
             history = (
-                await client.call_tool("get_completion_history", {"days": 30})
-            ).data
+                await _call_json(client, "get_completion_history", {"days": 30})
+            )["result"]
             assert len(history) == 1
             assert history[0]["content"] == "Bought oat milk"
     finally:
@@ -320,10 +334,9 @@ async def test_synergy_and_reschedule_guardrails(tmp_path: Path) -> None:
 
     try:
         async with Client(mcp) as client:
-            synergy = (await client.call_tool("get_tasks_by_synergy", {})).data
+            synergy = await _call_json(client, "get_tasks_by_synergy", {})
             assert [t["id"] for t in synergy["15min"]] == ["t1"]
 
-            # Reject ISO week date and path traversal task_id
             with pytest.raises(ToolError, match="YYYY-MM-DD"):
                 await client.call_tool(
                     "update_or_reschedule",
@@ -335,29 +348,25 @@ async def test_synergy_and_reschedule_guardrails(tmp_path: Path) -> None:
                     {"task_id": "../secret", "priority": 2},
                 )
 
-            # Reject task outside allowed_projects
             with pytest.raises(ToolError, match="outside allowed_projects"):
                 await client.call_tool(
                     "update_or_reschedule",
                     {"task_id": "t-hidden", "priority": 2},
                 )
 
-            # Updating labels with clear_review_flag=False preserves review
             await client.call_tool(
                 "update_or_reschedule",
                 {"task_id": "t1", "labels": ["home"]},
             )
-            # Explicit clear_review_flag=True removes review & preserves recurrence
-            upd = (
-                await client.call_tool(
-                    "update_or_reschedule",
-                    {
-                        "task_id": "t1",
-                        "new_due_date": "2026-12-01",
-                        "clear_review_flag": True,
-                    },
-                )
-            ).data
+            upd = await _call_json(
+                client,
+                "update_or_reschedule",
+                {
+                    "task_id": "t1",
+                    "new_due_date": "2026-12-01",
+                    "clear_review_flag": True,
+                },
+            )
             assert upd["preserved_recurrence"] is True
     finally:
         await todoist.aclose()
@@ -428,9 +437,11 @@ async def test_complete_task_and_history_project_isolation(tmp_path: Path) -> No
             with pytest.raises(ToolError, match="outside allowed_projects"):
                 await client.call_tool("complete_task", {"task_id": "t99"})
 
-            res = (await client.call_tool("complete_task", {"task_id": "t42"})).data
+            res = await _call_json(client, "complete_task", {"task_id": "t42"})
             assert res["completed"] is True
-            history = (await client.call_tool("get_completion_history", {"days": 7})).data
+            history = (
+                await _call_json(client, "get_completion_history", {"days": 7})
+            )["result"]
             assert [h["content"] for h in history] == ["Renew passport"]
     finally:
         await todoist.aclose()
@@ -479,12 +490,10 @@ def test_http_jwt_authz_discovery_and_removed_internal_sync(tmp_path: Path) -> N
     with TestClient(app) as client:
         assert client.get("/health").status_code == 200
 
-        # RFC 8414 requires exact issuer without spurious trailing slash
         prm = client.get("/.well-known/oauth-protected-resource/mcp")
         assert prm.status_code == 200
         assert prm.json()["authorization_servers"] == ["https://id.example.com"]
 
-        # Unauthenticated or wrong audience -> 401
         assert client.post("/mcp").status_code == 401
         wrong_aud = _mint("sub-allowed", aud="other-client")
         assert (
@@ -492,13 +501,11 @@ def test_http_jwt_authz_discovery_and_removed_internal_sync(tmp_path: Path) -> N
             == 401
         )
 
-        # Valid JWT for disallowed sub -> 403
         intruder_jwt = _mint("sub-intruder")
         resp_403 = client.post("/mcp", headers={"Authorization": f"Bearer {intruder_jwt}"})
         assert resp_403.status_code == 403
         assert resp_403.json()["error"] == "forbidden"
 
-        # Valid JWT for allowed sub returns stateless JSON response (no SSE stream)
         allowed_jwt = _mint("sub-allowed")
         resp_ok = client.post(
             "/mcp",
@@ -521,10 +528,8 @@ def test_http_jwt_authz_discovery_and_removed_internal_sync(tmp_path: Path) -> N
         assert resp_ok.headers["content-type"].startswith("application/json")
         assert resp_ok.json()["result"]["serverInfo"]["name"] == "autodoist"
 
-        # /internal/sync is removed (sync runs in-process)
         assert client.post("/internal/sync").status_code == 404
 
-        # Expired and wrong-issuer JWTs return 401
         expired = jwt.encode(
             {
                 "sub": "sub-allowed",
@@ -558,12 +563,17 @@ def test_http_jwt_authz_discovery_and_removed_internal_sync(tmp_path: Path) -> N
 
 @respx.mock
 def test_server_lifespan_runs_background_sync_and_cancels_cleanly(tmp_path: Path) -> None:
+    respx.get(f"{TODOIST_API_V1_BASE}/projects").mock(
+        return_value=httpx.Response(
+            200,
+            json={"results": [{"id": "p1", "name": "Personal"}], "next_cursor": None},
+        )
+    )
     respx.post(f"{TODOIST_API_V1_BASE}/sync").mock(
         return_value=httpx.Response(
             200,
             json={
                 "sync_token": "tok-bg",
-                "projects": [{"id": "p1", "name": "Personal"}],
                 "items": [],
             },
         )
@@ -663,7 +673,7 @@ async def test_synergy_sorting_overdue_filtering_and_error_cases(tmp_path: Path)
 
     try:
         async with Client(mcp) as client:
-            all_tasks = (await client.call_tool("get_tasks_by_synergy", {})).data
+            all_tasks = await _call_json(client, "get_tasks_by_synergy", {})
             assert [t["id"] for t in all_tasks["admin"]] == [
                 "t-p1-earlier",
                 "t-p1-soon",
@@ -672,9 +682,9 @@ async def test_synergy_sorting_overdue_filtering_and_error_cases(tmp_path: Path)
             ]
             assert [t["id"] for t in all_tasks["untagged"]] == ["t-untagged"]
 
-            no_overdue = (
-                await client.call_tool("get_tasks_by_synergy", {"include_overdue": False})
-            ).data
+            no_overdue = await _call_json(
+                client, "get_tasks_by_synergy", {"include_overdue": False}
+            )
             assert "t-overdue" not in [t["id"] for t in no_overdue["admin"]]
 
             with pytest.raises(ToolError, match="not allowed"):
@@ -717,17 +727,16 @@ async def test_capture_in_batch_dedup_and_mutation_input_guardrails(tmp_path: Pa
 
     try:
         async with Client(mcp) as client:
-            res = (
-                await client.call_tool(
-                    "capture_items",
-                    {
-                        "items": [
-                            {"content": "Call dentist", "project": "Personal"},
-                            {"content": "  call   DENTIST ", "project": "Personal"},
-                        ]
-                    },
-                )
-            ).data
+            res = await _call_json(
+                client,
+                "capture_items",
+                {
+                    "items": [
+                        {"content": "Call dentist", "project": "Personal"},
+                        {"content": "  call   DENTIST ", "project": "Personal"},
+                    ]
+                },
+            )
             assert [c["content"] for c in res["created"]] == ["Call dentist"]
             assert res["skipped_duplicates"] == [
                 {"content": "call   DENTIST", "project": "Personal"}

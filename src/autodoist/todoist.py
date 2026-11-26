@@ -2,10 +2,18 @@ from __future__ import annotations
 
 import time
 import uuid
+from collections.abc import Sequence
 from typing import Any
 
 import httpx
-from pydantic import BaseModel, Field
+
+from autodoist.models import (
+    CaptureTaskInput,
+    CreatedTaskOut,
+    TodoistActivityEvent,
+    TodoistProject,
+    TodoistTask,
+)
 
 TODOIST_API_V1_BASE = "https://api.todoist.com/api/v1"
 
@@ -14,38 +22,37 @@ class TodoistAPIError(RuntimeError):
     """Raised when Todoist returns an application-level /sync command error."""
 
 
-class TaskSummary(BaseModel):
-    id: str
-    content: str
-    project_id: str
-    project_name: str | None = None
-    labels: list[str] = Field(default_factory=list)
-    priority: int = 1
-    due_date: str | None = None
-    is_recurring: bool = False
+class ProjectCache:
+    """TTL-backed bi-directional mapping between active Todoist project IDs and names."""
 
+    def __init__(self, ttl_seconds: float = 600.0) -> None:
+        self._ttl_seconds = ttl_seconds
+        self._loaded_at: float | None = None
+        self._by_id: dict[str, str] = {}
+        self._by_name: dict[str, str] = {}
 
-class CaptureTaskInput(BaseModel):
-    content: str
-    project: str
-    labels: list[str] = Field(default_factory=list)
-    due_string: str | None = None
-    priority: int = 1
-    description: str = ""
+    def is_fresh(self) -> bool:
+        if self._loaded_at is None:
+            return False
+        return (time.monotonic() - self._loaded_at) < self._ttl_seconds
 
+    def replace(self, projects: Sequence[TodoistProject]) -> None:
+        by_id: dict[str, str] = {}
+        by_name: dict[str, str] = {}
+        for proj in projects:
+            if proj.is_deleted or proj.is_archived:
+                continue
+            by_id[proj.id] = proj.name
+            by_name[proj.name] = proj.id
+        self._by_id = by_id
+        self._by_name = by_name
+        self._loaded_at = time.monotonic()
 
-def _parse_task_summary(raw: dict[str, Any], project_name: str | None = None) -> TaskSummary:
-    due = raw.get("due") or {}
-    return TaskSummary(
-        id=str(raw["id"]),
-        content=str(raw.get("content") or ""),
-        project_id=str(raw.get("project_id") or ""),
-        project_name=project_name,
-        labels=[str(lbl) for lbl in (raw.get("labels") or [])],
-        priority=int(raw.get("priority") or 1),
-        due_date=due.get("date") if isinstance(due, dict) else None,
-        is_recurring=bool(due.get("is_recurring", False)) if isinstance(due, dict) else False,
-    )
+    def get_id(self, name: str) -> str | None:
+        return self._by_name.get(name)
+
+    def get_name(self, project_id: str) -> str | None:
+        return self._by_id.get(project_id)
 
 
 class TodoistClient:
@@ -65,38 +72,16 @@ class TodoistClient:
             headers={"Authorization": f"Bearer {api_token}"},
             timeout=20.0,
         )
-        self._projects_ttl_seconds = projects_ttl_seconds
-        self._projects_loaded_at = 0.0
-        self._projects_fully_loaded = False
-        self._missing_project_ids: set[str] = set()
-        self._name_to_id: dict[str, str] = {}
-        self._id_to_name: dict[str, str] = {}
+        self._projects = ProjectCache(ttl_seconds=projects_ttl_seconds)
 
     async def aclose(self) -> None:
         if self._owns_client:
             await self._client.aclose()
 
-    def update_projects_cache(self, projects: list[dict[str, Any]]) -> None:
-        for proj in projects:
-            pid = str(proj["id"])
-            old_name = self._id_to_name.get(pid)
-            if proj.get("is_deleted") or proj.get("is_archived"):
-                self._id_to_name.pop(pid, None)
-                if old_name and self._name_to_id.get(old_name) == pid:
-                    self._name_to_id.pop(old_name, None)
-                continue
-            name = str(proj["name"])
-            if old_name and old_name != name and self._name_to_id.get(old_name) == pid:
-                self._name_to_id.pop(old_name, None)
-            self._name_to_id[name] = pid
-            self._id_to_name[pid] = name
-            self._missing_project_ids.discard(pid)
-
-    async def ensure_projects_loaded(self, *, force_refresh: bool = False) -> bool:
-        cache_expired = (time.monotonic() - self._projects_loaded_at) >= self._projects_ttl_seconds
-        if self._projects_fully_loaded and not force_refresh and not cache_expired:
+    async def refresh_projects(self, *, force: bool = False) -> bool:
+        if not force and self._projects.is_fresh():
             return False
-        projects: list[dict[str, Any]] = []
+        projects: list[TodoistProject] = []
         cursor: str | None = None
         while True:
             params: dict[str, str] = {}
@@ -105,39 +90,35 @@ class TodoistClient:
             resp = await self._client.get("/projects", params=params)
             resp.raise_for_status()
             payload = resp.json()
-            projects.extend(payload.get("results") or [])
+            for raw in payload.get("results") or []:
+                projects.append(TodoistProject.model_validate(raw))
             cursor = payload.get("next_cursor")
             if not cursor:
                 break
-        self._name_to_id.clear()
-        self._id_to_name.clear()
-        self._missing_project_ids.clear()
-        self.update_projects_cache(projects)
-        self._projects_fully_loaded = True
-        self._projects_loaded_at = time.monotonic()
+        self._projects.replace(projects)
         return True
 
     async def get_project_id(self, name: str) -> str:
-        refreshed = await self.ensure_projects_loaded()
-        if name not in self._name_to_id and not refreshed:
-            await self.ensure_projects_loaded(force_refresh=True)
-        if name not in self._name_to_id:
+        refreshed = await self.refresh_projects()
+        pid = self._projects.get_id(name)
+        if pid is None and not refreshed:
+            await self.refresh_projects(force=True)
+            pid = self._projects.get_id(name)
+        if pid is None:
             raise ValueError(f"Project {name!r} not found in Todoist")
-        return self._name_to_id[name]
+        return pid
 
     def get_project_name(self, project_id: str) -> str | None:
-        return self._id_to_name.get(project_id)
+        return self._projects.get_name(project_id)
 
     async def resolve_project_name(self, project_id: str) -> str | None:
         if not project_id:
             return None
-        refreshed = await self.ensure_projects_loaded()
-        name = self._id_to_name.get(project_id)
-        if name is None and not refreshed and project_id not in self._missing_project_ids:
-            await self.ensure_projects_loaded(force_refresh=True)
-            name = self._id_to_name.get(project_id)
-        if name is None:
-            self._missing_project_ids.add(project_id)
+        refreshed = await self.refresh_projects()
+        name = self._projects.get_name(project_id)
+        if name is None and not refreshed:
+            await self.refresh_projects(force=True)
+            name = self._projects.get_name(project_id)
         return name
 
     async def get_active_tasks(
@@ -145,9 +126,9 @@ class TodoistClient:
         *,
         project_id: str | None = None,
         label: str | None = None,
-    ) -> list[TaskSummary]:
-        await self.ensure_projects_loaded()
-        tasks: list[TaskSummary] = []
+    ) -> list[TodoistTask]:
+        await self.refresh_projects()
+        tasks: list[TodoistTask] = []
         cursor: str | None = None
         while True:
             params: dict[str, str] = {}
@@ -161,22 +142,23 @@ class TodoistClient:
             resp.raise_for_status()
             payload = resp.json()
             for raw in payload.get("results") or []:
-                pid = str(raw.get("project_id") or "")
-                tasks.append(_parse_task_summary(raw, self.get_project_name(pid)))
+                task = TodoistTask.model_validate(raw)
+                task.project_name = self._projects.get_name(task.project_id)
+                tasks.append(task)
             cursor = payload.get("next_cursor")
             if not cursor:
                 break
         return tasks
 
-    async def get_task(self, task_id: str) -> dict[str, Any]:
+    async def get_task(self, task_id: str) -> TodoistTask:
         resp = await self._client.get(f"/tasks/{task_id}")
         resp.raise_for_status()
-        return dict(resp.json())
+        return TodoistTask.model_validate(resp.json())
 
-    async def batch_add_tasks(self, items: list[CaptureTaskInput]) -> list[dict[str, str]]:
+    async def batch_add_tasks(self, items: list[CaptureTaskInput]) -> list[CreatedTaskOut]:
         if not items:
             return []
-        await self.ensure_projects_loaded()
+        await self.refresh_projects()
 
         commands: list[dict[str, Any]] = []
         temp_meta: list[tuple[str, CaptureTaskInput]] = []
@@ -193,13 +175,12 @@ class TodoistClient:
             if item.description:
                 args["description"] = item.description
 
-            cmd_uuid = str(uuid.uuid4())
             temp_id = str(uuid.uuid4())
             commands.append(
                 {
                     "type": "item_add",
                     "temp_id": temp_id,
-                    "uuid": cmd_uuid,
+                    "uuid": str(uuid.uuid4()),
                     "args": args,
                 }
             )
@@ -212,18 +193,18 @@ class TodoistClient:
 
         mapping = data.get("temp_id_mapping", {})
         return [
-            {
-                "id": str(mapping.get(temp_id, "")),
-                "content": item.content,
-                "project": item.project,
-            }
+            CreatedTaskOut(
+                id=str(mapping.get(temp_id, "")),
+                content=item.content,
+                project=item.project,
+            )
             for temp_id, item in temp_meta
         ]
 
     async def update_task(
         self,
         task_id: str,
-        existing_task: dict[str, Any],
+        existing_task: TodoistTask,
         *,
         new_due_date: str | None = None,
         labels: list[str] | None = None,
@@ -234,19 +215,15 @@ class TodoistClient:
         update_args: dict[str, Any] = {"id": task_id}
 
         if new_due_date is not None:
-            existing_due = existing_task.get("due")
-            if (
-                isinstance(existing_due, dict)
-                and existing_due.get("is_recurring")
-                and existing_due.get("string")
-            ):
+            due = existing_task.due
+            if due is not None and due.is_recurring and due.string:
                 due_payload: dict[str, Any] = {
                     "date": new_due_date,
-                    "string": existing_due["string"],
+                    "string": due.string,
                     "is_recurring": True,
                 }
-                if existing_due.get("lang"):
-                    due_payload["lang"] = existing_due["lang"]
+                if due.lang:
+                    due_payload["lang"] = due.lang
                 update_args["due"] = due_payload
             else:
                 update_args["due"] = {"date": new_due_date}
@@ -265,7 +242,7 @@ class TodoistClient:
                 }
             )
 
-        if project_id is not None and project_id != str(existing_task.get("project_id", "")):
+        if project_id is not None and project_id != existing_task.project_id:
             commands.append(
                 {
                     "type": "item_move",
@@ -285,30 +262,28 @@ class TodoistClient:
         resp = await self._client.post(f"/tasks/{task_id}/close")
         resp.raise_for_status()
 
-    async def sync_incremental(self, sync_token: str) -> dict[str, Any]:
+    async def sync_incremental(self, sync_token: str) -> tuple[str, list[TodoistTask]]:
         resp = await self._client.post(
             "/sync",
             json={
                 "sync_token": sync_token,
-                "resource_types": ["items", "projects"],
+                "resource_types": ["items"],
             },
         )
         resp.raise_for_status()
-        data = dict(resp.json())
-        if "projects" in data and isinstance(data["projects"], list):
-            self.update_projects_cache(data["projects"])
-            if sync_token == "*" or self._projects_fully_loaded:
-                self._projects_fully_loaded = True
-                self._projects_loaded_at = time.monotonic()
-        return data
+        data = resp.json()
+        raw_new_token = data.get("sync_token")
+        new_token = str(raw_new_token) if raw_new_token else sync_token
+        items = [TodoistTask.model_validate(raw) for raw in (data.get("items") or [])]
+        return new_token, items
 
     async def get_completed_activities(
         self,
         since_iso: str,
         until_iso: str,
-    ) -> list[dict[str, Any]]:
+    ) -> list[TodoistActivityEvent]:
         """Query Todoist Activity Log for completed tasks (including recurring instances)."""
-        events: list[dict[str, Any]] = []
+        events: list[TodoistActivityEvent] = []
         cursor: str | None = None
         while True:
             params: dict[str, str | int] = {
@@ -326,7 +301,10 @@ class TodoistClient:
             page_events = payload.get("results")
             if page_events is None:
                 page_events = payload.get("events") or []
-            events.extend(page_events)
+            for raw in page_events:
+                parsed = TodoistActivityEvent.from_api_event(raw)
+                if parsed is not None:
+                    events.append(parsed)
             cursor = payload.get("next_cursor")
             if not cursor:
                 break

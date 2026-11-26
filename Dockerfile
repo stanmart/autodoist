@@ -14,6 +14,7 @@ COPY pyproject.toml uv.lock ./
 RUN uv sync --frozen --no-dev --no-install-project
 
 COPY src ./src
+RUN uv sync --frozen --no-dev
 
 RUN useradd --create-home --uid 10001 autodoist \
     && mkdir -p /app/data \
@@ -22,4 +23,4 @@ RUN useradd --create-home --uid 10001 autodoist \
 USER autodoist
 EXPOSE 8000
 
-CMD ["uvicorn", "src.server:create_app", "--factory", "--host", "0.0.0.0", "--port", "8000", "--proxy-headers", "--forwarded-allow-ips=*"]
+CMD ["uvicorn", "autodoist.server:create_app", "--factory", "--host", "0.0.0.0", "--port", "8000", "--proxy-headers", "--forwarded-allow-ips=*"]

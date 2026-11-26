@@ -5,7 +5,7 @@ from pathlib import Path
 
 import pytest
 
-from src.config import (
+from autodoist.config import (
     AppConfig,
     AuthConfig,
     EnvSettings,
@@ -14,7 +14,7 @@ from src.config import (
     validate_runtime_security,
     validate_todoist_token,
 )
-from src.db import CompletionRecord, Database
+from autodoist.db import CompletionRecord, Database
 
 
 def test_app_config_loads_default_toml() -> None:
@@ -171,7 +171,7 @@ def test_db_sync_state_and_completion_dedup(tmp_path: Path) -> None:
     )
 
     personal = db.get_completion_history(days=90, project="Personal")
-    assert {row["content"] for row in personal} == {"Bought milk", "Bought bread"}
+    assert {row.content for row in personal} == {"Bought milk", "Bought bread"}
     all_recent = db.get_completion_history(days=90)
     assert len(all_recent) == 3
 
