@@ -25,14 +25,32 @@ class AuthConfig(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     mcp_base_url: str = ""
-    pocket_id_issuer: str = "https://id.csigahaz.eu"
+    oidc_issuer: str = ""
+    oidc_jwks_uri: str | None = None
+    jwt_algorithm: str = "RS256"
     jwt_audience: str | list[str] | None = None
     allowed_user_subs: frozenset[str] = frozenset()
 
-    @field_validator("mcp_base_url", "pocket_id_issuer", mode="after")
+    @field_validator("mcp_base_url", "oidc_issuer", mode="after")
     @classmethod
     def strip_trailing_slash(cls, value: str) -> str:
         return value.strip().rstrip("/")
+
+    @field_validator("oidc_jwks_uri", mode="before")
+    @classmethod
+    def normalize_jwks_uri(cls, value: object) -> object:
+        if isinstance(value, str):
+            stripped = value.strip()
+            return stripped or None
+        return value
+
+    @field_validator("jwt_algorithm", mode="after")
+    @classmethod
+    def validate_jwt_algorithm(cls, value: str) -> str:
+        alg = value.strip()
+        if not alg or alg.lower() == "none" or alg.upper().startswith("HS"):
+            raise ValueError(f"Unsupported asymmetric jwt_algorithm: {value!r}")
+        return alg
 
     @field_validator("jwt_audience", mode="before")
     @classmethod
@@ -159,8 +177,8 @@ def validate_runtime_security(app_config: AppConfig, env: EnvSettings) -> None:
         return
     if not app_config.auth.mcp_base_url:
         raise ValueError("auth.mcp_base_url must be set when AUTH_DISABLED is false")
-    if not app_config.auth.pocket_id_issuer:
-        raise ValueError("auth.pocket_id_issuer must be set when AUTH_DISABLED is false")
+    if not app_config.auth.oidc_issuer:
+        raise ValueError("auth.oidc_issuer must be set when AUTH_DISABLED is false")
     if not app_config.auth.allowed_user_subs:
         raise ValueError(
             "auth.allowed_user_subs must contain at least one sub when AUTH_DISABLED is false"

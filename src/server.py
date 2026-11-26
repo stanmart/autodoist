@@ -120,16 +120,17 @@ def build_auth_provider(
 ) -> RemoteAuthProvider | None:
     if env.auth_disabled:
         return None
-    issuer = app_config.auth.pocket_id_issuer
+    issuer = app_config.auth.oidc_issuer
+    jwks_uri = app_config.auth.oidc_jwks_uri or f"{issuer}/.well-known/jwks.json"
     if app_config.auth.jwt_audience is None and token_verifier is None:
         logger.warning(
-            "auth.jwt_audience is unset; set it once Gemini/Pocket ID aud is verified"
+            "auth.jwt_audience is unset; set it once your client/OIDC provider aud is verified"
         )
     verifier = token_verifier or JWTVerifier(
-        jwks_uri=f"{issuer}/.well-known/jwks.json",
+        jwks_uri=jwks_uri,
         issuer=issuer,
         audience=app_config.auth.jwt_audience,
-        algorithm="RS256",
+        algorithm=app_config.auth.jwt_algorithm,
     )
     return RemoteAuthProvider(
         token_verifier=verifier,

@@ -34,7 +34,7 @@ def _make_config(
         storage=StorageConfig(db_path=str(tmp_path / "autodoist.db")),
         auth=AuthConfig(
             mcp_base_url="https://mcp.example.com",
-            pocket_id_issuer="https://id.csigahaz.eu",
+            oidc_issuer="https://id.example.com",
             jwt_audience=jwt_audience,
             allowed_user_subs=allowed_user_subs,
         ),
@@ -449,7 +449,7 @@ def test_http_jwt_authz_discovery_and_internal_sync_secret(tmp_path: Path) -> No
     )
     verifier = JWTVerifier(
         public_key=public_pem,
-        issuer="https://id.csigahaz.eu",
+        issuer="https://id.example.com",
         audience="https://mcp.example.com",
         algorithm="RS256",
     )
@@ -478,7 +478,7 @@ def test_http_jwt_authz_discovery_and_internal_sync_secret(tmp_path: Path) -> No
         return jwt.encode(
             {
                 "sub": sub,
-                "iss": "https://id.csigahaz.eu",
+                "iss": "https://id.example.com",
                 "aud": aud,
                 "iat": now,
                 "exp": now + 300,
@@ -493,7 +493,7 @@ def test_http_jwt_authz_discovery_and_internal_sync_secret(tmp_path: Path) -> No
         # RFC 8414 requires exact issuer without spurious trailing slash
         prm = client.get("/.well-known/oauth-protected-resource/mcp")
         assert prm.status_code == 200
-        assert prm.json()["authorization_servers"] == ["https://id.csigahaz.eu"]
+        assert prm.json()["authorization_servers"] == ["https://id.example.com"]
 
         # Unauthenticated or wrong audience -> 401
         assert client.post("/mcp").status_code == 401
@@ -534,7 +534,7 @@ def test_http_jwt_authz_discovery_and_internal_sync_secret(tmp_path: Path) -> No
         expired = jwt.encode(
             {
                 "sub": "sub-allowed",
-                "iss": "https://id.csigahaz.eu",
+                "iss": "https://id.example.com",
                 "aud": "https://mcp.example.com",
                 "iat": now - 600,
                 "exp": now - 60,
