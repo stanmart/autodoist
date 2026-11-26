@@ -4,6 +4,8 @@ import asyncio
 import json
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
+from typing import Any
+from urllib.parse import parse_qs
 
 import httpx
 import pytest
@@ -17,6 +19,18 @@ from autodoist.todoist import TODOIST_API_V1_BASE, ProjectCache, TodoistAPIError
 
 def _iso(dt: datetime) -> str:
     return dt.astimezone(UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+def _parse_sync_form(req: httpx.Request) -> dict[str, str]:
+    assert req.headers["content-type"].startswith("application/x-www-form-urlencoded")
+    parsed = parse_qs(req.content.decode("utf-8"), strict_parsing=True)
+    return {k: v[0] for k, v in parsed.items()}
+
+
+def _parse_sync_commands(req: httpx.Request) -> list[dict[str, Any]]:
+    form = _parse_sync_form(req)
+    commands: list[dict[str, Any]] = json.loads(form["commands"])
+    return commands
 
 
 @respx.mock
@@ -100,11 +114,11 @@ async def test_batch_add_tasks_creates_and_maps_ids() -> None:
             200,
             json={
                 "sync_status": {
-                    cmd["uuid"]: "ok" for cmd in json.loads(req.content)["commands"]
+                    cmd["uuid"]: "ok" for cmd in _parse_sync_commands(req)
                 },
                 "temp_id_mapping": {
                     cmd["temp_id"]: f"real-{idx}"
-                    for idx, cmd in enumerate(json.loads(req.content)["commands"])
+                    for idx, cmd in enumerate(_parse_sync_commands(req))
                 },
             },
         )
@@ -139,7 +153,7 @@ async def test_update_task_preserves_recurrence_and_moves_project() -> None:
             200,
             json={
                 "sync_status": {
-                    cmd["uuid"]: "ok" for cmd in json.loads(req.content)["commands"]
+                    cmd["uuid"]: "ok" for cmd in _parse_sync_commands(req)
                 }
             },
         )
@@ -169,7 +183,7 @@ async def test_update_task_preserves_recurrence_and_moves_project() -> None:
     finally:
         await client.aclose()
 
-    commands = json.loads(sync_route.calls[0].request.content)["commands"]
+    commands = _parse_sync_commands(sync_route.calls[0].request)
     assert [c["type"] for c in commands] == ["item_update", "item_move"]
     assert commands[0]["args"]["due"] == {
         "date": "2026-11-30",
@@ -193,7 +207,7 @@ async def test_batch_add_raises_on_sync_command_error() -> None:
             200,
             json={
                 "sync_status": {
-                    json.loads(req.content)["commands"][0]["uuid"]: {"error": "Invalid"}
+                    _parse_sync_commands(req)[0]["uuid"]: {"error": "Invalid"}
                 }
             },
         )
@@ -413,7 +427,7 @@ async def test_client_project_cache_ttl_and_pure_sync_incremental() -> None:
             ),
         ]
     )
-    respx.post(f"{TODOIST_API_V1_BASE}/sync").mock(
+    sync_route = respx.post(f"{TODOIST_API_V1_BASE}/sync").mock(
         return_value=httpx.Response(200, json={"sync_token": "tok-2", "items": []})
     )
 
@@ -424,6 +438,9 @@ async def test_client_project_cache_ttl_and_pure_sync_incremental() -> None:
         assert token == "tok-2"
         assert items == []
         assert client.get_project_name("p1") is None
+        form = _parse_sync_form(sync_route.calls[0].request)
+        assert form["sync_token"] == "tok-1"
+        assert json.loads(form["resource_types"]) == ["items"]
 
         assert await client.get_project_id("Personal") == "p1"
         await asyncio.sleep(0.03)
@@ -444,7 +461,7 @@ async def test_update_task_non_recurring_and_noop() -> None:
             200,
             json={
                 "sync_status": {
-                    cmd["uuid"]: "ok" for cmd in json.loads(req.content)["commands"]
+                    cmd["uuid"]: "ok" for cmd in _parse_sync_commands(req)
                 }
             },
         )
@@ -461,7 +478,7 @@ async def test_update_task_non_recurring_and_noop() -> None:
         await client.aclose()
 
     assert sync_route.call_count == 1
-    cmd = json.loads(sync_route.calls[0].request.content)["commands"][0]
+    cmd = _parse_sync_commands(sync_route.calls[0].request)[0]
     assert cmd["type"] == "item_update"
     assert cmd["args"]["due"] == {"date": "2026-12-05"}
 

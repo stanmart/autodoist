@@ -3,7 +3,7 @@ from __future__ import annotations
 import asyncio
 import logging
 from contextlib import asynccontextmanager, suppress
-from typing import Any
+from typing import Annotated, Any
 
 import uvicorn
 from fastmcp import FastMCP
@@ -11,7 +11,7 @@ from fastmcp.server.auth import RemoteAuthProvider
 from fastmcp.server.auth.providers.jwt import JWTVerifier
 from fastmcp.server.dependencies import get_access_token
 from mcp.server.auth.middleware.bearer_auth import AuthenticatedUser
-from pydantic import AnyHttpUrl, TypeAdapter, UrlConstraints
+from pydantic import AnyHttpUrl, Field, TypeAdapter, UrlConstraints
 from starlette.middleware import Middleware
 from starlette.requests import Request
 from starlette.responses import JSONResponse
@@ -39,15 +39,9 @@ from autodoist.todoist import TodoistClient
 
 logger = logging.getLogger(__name__)
 
-_ISSUER_URL_ADAPTER = TypeAdapter(AnyHttpUrl)
-try:
-    from typing import Annotated
-
-    _ISSUER_URL_ADAPTER = TypeAdapter(
-        Annotated[AnyHttpUrl, UrlConstraints(preserve_empty_path=True)]
-    )
-except Exception:  # pragma: no cover
-    pass
+_ISSUER_URL_ADAPTER = TypeAdapter(
+    Annotated[AnyHttpUrl, UrlConstraints(preserve_empty_path=True)]
+)
 
 
 class _AllowedUserASGIMiddleware:
@@ -203,7 +197,10 @@ def create_server(
         task_id: str,
         new_due_date: str | None = None,
         labels: list[str] | None = None,
-        priority: int | None = None,
+        priority: Annotated[
+            int | None,
+            Field(description="Todoist priority: 1 (p1, highest) to 4 (p4, normal)."),
+        ] = None,
         project: str | None = None,
         clear_review_flag: bool = False,
     ) -> UpdateTaskResult:

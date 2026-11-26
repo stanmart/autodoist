@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import time
 import uuid
 from collections.abc import Sequence
@@ -186,9 +187,7 @@ class TodoistClient:
             )
             temp_meta.append((temp_id, item))
 
-        resp = await self._client.post("/sync", json={"commands": commands})
-        resp.raise_for_status()
-        data = resp.json()
+        data = await self._post_sync(commands=commands)
         self._raise_on_sync_errors(data)
 
         mapping = data.get("temp_id_mapping", {})
@@ -254,24 +253,18 @@ class TodoistClient:
         if not commands:
             return
 
-        resp = await self._client.post("/sync", json={"commands": commands})
-        resp.raise_for_status()
-        self._raise_on_sync_errors(resp.json())
+        data = await self._post_sync(commands=commands)
+        self._raise_on_sync_errors(data)
 
     async def close_task(self, task_id: str) -> None:
         resp = await self._client.post(f"/tasks/{task_id}/close")
         resp.raise_for_status()
 
     async def sync_incremental(self, sync_token: str) -> tuple[str, list[TodoistTask]]:
-        resp = await self._client.post(
-            "/sync",
-            json={
-                "sync_token": sync_token,
-                "resource_types": ["items"],
-            },
+        data = await self._post_sync(
+            sync_token=sync_token,
+            resource_types=["items"],
         )
-        resp.raise_for_status()
-        data = resp.json()
         raw_new_token = data.get("sync_token")
         new_token = str(raw_new_token) if raw_new_token else sync_token
         items = [TodoistTask.model_validate(raw) for raw in (data.get("items") or [])]
@@ -309,6 +302,25 @@ class TodoistClient:
             if not cursor:
                 break
         return events
+
+    async def _post_sync(
+        self,
+        *,
+        sync_token: str | None = None,
+        resource_types: Sequence[str] | None = None,
+        commands: Sequence[dict[str, Any]] | None = None,
+    ) -> dict[str, Any]:
+        form: dict[str, str] = {}
+        if sync_token is not None:
+            form["sync_token"] = sync_token
+        if resource_types is not None:
+            form["resource_types"] = json.dumps(list(resource_types))
+        if commands is not None:
+            form["commands"] = json.dumps(list(commands))
+        resp = await self._client.post("/sync", data=form)
+        resp.raise_for_status()
+        payload: dict[str, Any] = resp.json()
+        return payload
 
     @staticmethod
     def _raise_on_sync_errors(payload: dict[str, Any]) -> None:

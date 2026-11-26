@@ -5,6 +5,7 @@ import time
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
+from urllib.parse import parse_qs
 
 import httpx
 import jwt
@@ -78,6 +79,13 @@ async def _call_json(client: Client, name: str, args: dict[str, Any]) -> dict[st
     return res.structured_content
 
 
+def _parse_sync_commands(req: httpx.Request) -> list[dict[str, Any]]:
+    assert req.headers["content-type"].startswith("application/x-www-form-urlencoded")
+    parsed = parse_qs(req.content.decode("utf-8"), strict_parsing=True)
+    commands: list[dict[str, Any]] = json.loads(parsed["commands"][0])
+    return commands
+
+
 async def test_only_five_safe_tools_are_registered(tmp_path: Path) -> None:
     cfg, env = _make_config(tmp_path)
     mcp = create_server(cfg, env)
@@ -132,11 +140,11 @@ async def test_capture_items_guardrails_review_tag_duplicates_and_post_hoc(
             200,
             json={
                 "sync_status": {
-                    cmd["uuid"]: "ok" for cmd in json.loads(req.content)["commands"]
+                    cmd["uuid"]: "ok" for cmd in _parse_sync_commands(req)
                 },
                 "temp_id_mapping": {
                     cmd["temp_id"]: f"created-{i}"
-                    for i, cmd in enumerate(json.loads(req.content)["commands"])
+                    for i, cmd in enumerate(_parse_sync_commands(req))
                 },
             },
         )
@@ -213,8 +221,10 @@ async def test_capture_items_guardrails_review_tag_duplicates_and_post_hoc(
     finally:
         await todoist.aclose()
 
-    sent_cmd = json.loads(sync_route.calls[0].request.content)["commands"][0]
+    sent_cmd = _parse_sync_commands(sync_route.calls[0].request)[0]
     assert sent_cmd["args"]["labels"] == ["home", "review"]
+    # App priority 3 (p3) maps to Todoist API priority 2
+    assert sent_cmd["args"]["priority"] == 2
 
 
 @respx.mock
@@ -322,7 +332,7 @@ async def test_synergy_and_reschedule_guardrails(tmp_path: Path) -> None:
             200,
             json={
                 "sync_status": {
-                    cmd["uuid"]: "ok" for cmd in json.loads(req.content)["commands"]
+                    cmd["uuid"]: "ok" for cmd in _parse_sync_commands(req)
                 }
             },
         )
@@ -336,6 +346,8 @@ async def test_synergy_and_reschedule_guardrails(tmp_path: Path) -> None:
         async with Client(mcp) as client:
             synergy = await _call_json(client, "get_tasks_by_synergy", {})
             assert [t["id"] for t in synergy["15min"]] == ["t1"]
+            # Todoist API priority 2 maps to app priority 3 (p3)
+            assert synergy["15min"][0]["priority"] == 3
 
             with pytest.raises(ToolError, match="YYYY-MM-DD"):
                 await client.call_tool(
@@ -356,7 +368,7 @@ async def test_synergy_and_reschedule_guardrails(tmp_path: Path) -> None:
 
             await client.call_tool(
                 "update_or_reschedule",
-                {"task_id": "t1", "labels": ["home"]},
+                {"task_id": "t1", "labels": ["home"], "priority": 1},
             )
             upd = await _call_json(
                 client,
@@ -371,10 +383,12 @@ async def test_synergy_and_reschedule_guardrails(tmp_path: Path) -> None:
     finally:
         await todoist.aclose()
 
-    first_cmd = json.loads(sync_route.calls[0].request.content)["commands"][0]
+    first_cmd = _parse_sync_commands(sync_route.calls[0].request)[0]
     assert first_cmd["args"]["labels"] == ["home", "review"]
+    # App priority 1 (p1) maps to Todoist API priority 4
+    assert first_cmd["args"]["priority"] == 4
 
-    second_cmd = json.loads(sync_route.calls[1].request.content)["commands"][0]
+    second_cmd = _parse_sync_commands(sync_route.calls[1].request)[0]
     assert second_cmd["args"]["labels"] == ["15min"]
     assert second_cmd["args"]["due"]["string"] == "every week"
     assert second_cmd["args"]["due"]["is_recurring"] is True
@@ -680,7 +694,9 @@ async def test_synergy_sorting_overdue_filtering_and_error_cases(tmp_path: Path)
                 "t-overdue",
                 "t-p4-later",
             ]
+            assert [t["priority"] for t in all_tasks["admin"]] == [1, 1, 3, 4]
             assert [t["id"] for t in all_tasks["untagged"]] == ["t-untagged"]
+            assert all_tasks["untagged"][0]["priority"] == 4
 
             no_overdue = await _call_json(
                 client, "get_tasks_by_synergy", {"include_overdue": False}
@@ -706,16 +722,16 @@ async def test_capture_in_batch_dedup_and_mutation_input_guardrails(tmp_path: Pa
     respx.get(f"{TODOIST_API_V1_BASE}/tasks").mock(
         return_value=httpx.Response(200, json={"results": [], "next_cursor": None})
     )
-    respx.post(f"{TODOIST_API_V1_BASE}/sync").mock(
+    sync_route = respx.post(f"{TODOIST_API_V1_BASE}/sync").mock(
         side_effect=lambda req: httpx.Response(
             200,
             json={
                 "sync_status": {
-                    cmd["uuid"]: "ok" for cmd in json.loads(req.content)["commands"]
+                    cmd["uuid"]: "ok" for cmd in _parse_sync_commands(req)
                 },
                 "temp_id_mapping": {
                     cmd["temp_id"]: f"id-{i}"
-                    for i, cmd in enumerate(json.loads(req.content)["commands"])
+                    for i, cmd in enumerate(_parse_sync_commands(req))
                 },
             },
         )
@@ -740,6 +756,8 @@ async def test_capture_in_batch_dedup_and_mutation_input_guardrails(tmp_path: Pa
                 },
             )
             assert [c["content"] for c in res["created"]] == ["Call dentist"]
+            # Default capture priority is app 4 (p4), which maps to Todoist API priority 1
+            assert _parse_sync_commands(sync_route.calls[0].request)[0]["args"]["priority"] == 1
             assert res["logged_post_hoc"] == [{"content": "Bought soap", "project": "Personal"}]
             assert res["skipped_duplicates"] == [
                 {"content": "call   DENTIST", "project": "Personal"},
