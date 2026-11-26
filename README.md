@@ -1,6 +1,6 @@
 # autodoist
 
-A lean MCP server and mini-backend sitting between **Gemini** and **Todoist** (API v1), with code-enforced guardrails, Pocket ID OAuth 2.1 (`RemoteAuthProvider` + `JWTVerifier`), and SQLite completion history.
+A lean MCP server and mini-backend sitting between an MCP client (e.g. **Gemini**) and **Todoist** (API v1), with code-enforced guardrails, OIDC / OAuth 2.1 (`RemoteAuthProvider` + `JWTVerifier`), and SQLite completion history.
 
 ## MCP Tools (5)
 
@@ -15,7 +15,7 @@ A lean MCP server and mini-backend sitting between **Gemini** and **Todoist** (A
 Non-secret settings live in [config.toml](config.toml) (`AUTODOIST_CONFIG` overrides the path):
 
 - `[storage]`: `db_path` (default `data/autodoist.db`)
-- `[auth]`: `mcp_base_url`, `pocket_id_issuer`, optional `jwt_audience`, `allowed_user_subs`
+- `[auth]`: `mcp_base_url`, `oidc_issuer`, optional `oidc_jwks_uri`, `jwt_algorithm` (default `RS256`), optional `jwt_audience`, `allowed_user_subs`
 - `[rules]`: `allowed_projects`, `capture_projects`, `allowed_labels`, `synergy_labels`, `review_label`
 
 Secrets live in `.env` (see [.env.example](.env.example)):
@@ -43,7 +43,7 @@ uv run ruff check .
 ## Docker Compose Deployment
 
 1. Copy `.env.example` to `.env` and set `TODOIST_API_TOKEN` and `SYNC_SECRET`.
-2. Edit `config.toml` with your `mcp_base_url`, `pocket_id_issuer`, and `allowed_user_subs`.
+2. Edit `config.toml` with your `mcp_base_url`, `oidc_issuer` (plus `oidc_jwks_uri` if your provider does not use `/.well-known/jwks.json`), and `allowed_user_subs`.
 3. Start behind an HTTPS reverse proxy (Caddy/Nginx/Traefik) pointing at `127.0.0.1:8000`:
 
 ```bash
@@ -57,4 +57,4 @@ curl -fsS -X POST https://your-domain.example/internal/sync \
   -H "X-Sync-Secret: $SYNC_SECRET"
 ```
 
-5. In Gemini (**Customize -> Connected Apps -> + Custom -> Cloud MCP**), add `https://your-domain.example/mcp` and complete the Pocket ID passkey flow. Once verified, set `jwt_audience` in `config.toml` to the `aud` claim issued by Pocket ID.
+5. In Gemini (**Customize -> Connected Apps -> + Custom -> Cloud MCP**), add `https://your-domain.example/mcp` and complete the OIDC login flow. Once verified, set `jwt_audience` in `config.toml` to the `aud` claim issued by your OIDC provider.

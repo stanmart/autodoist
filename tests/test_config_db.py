@@ -12,7 +12,8 @@ from src.db import Database
 def test_app_config_loads_default_toml() -> None:
     cfg = AppConfig.from_toml(Path("config.toml"))
     assert cfg.storage.db_path == "data/autodoist.db"
-    assert cfg.auth.pocket_id_issuer == "https://id.csigahaz.eu"
+    assert cfg.auth.oidc_issuer == "https://id.example.com"
+    assert cfg.auth.jwt_algorithm == "RS256"
     assert cfg.rules.allowed_projects == ["Inbox", "Personal", "Household"]
     assert cfg.rules.capture_projects == ["Personal", "Household"]
     assert cfg.rules.review_label == "review"
@@ -55,18 +56,34 @@ def test_runtime_security_fails_closed() -> None:
         review_label="review",
     )
     cfg_no_subs = AppConfig(
-        auth=AuthConfig(mcp_base_url="https://mcp.example.com/", allowed_user_subs=frozenset()),
+        auth=AuthConfig(
+            mcp_base_url="https://mcp.example.com/",
+            oidc_issuer="https://id.example.com/",
+            allowed_user_subs=frozenset(),
+        ),
         rules=rules,
     )
     assert cfg_no_subs.auth.mcp_base_url == "https://mcp.example.com"
+    assert cfg_no_subs.auth.oidc_issuer == "https://id.example.com"
 
     prod_env = EnvSettings(_env_file=None, sync_secret="sync-ok", auth_disabled=False)
     with pytest.raises(ValueError, match="allowed_user_subs"):
         validate_runtime_security(cfg_no_subs, prod_env)
 
+    cfg_no_issuer = AppConfig(
+        auth=AuthConfig(
+            mcp_base_url="https://mcp.example.com",
+            allowed_user_subs=["user-1"],
+        ),
+        rules=rules,
+    )
+    with pytest.raises(ValueError, match="oidc_issuer"):
+        validate_runtime_security(cfg_no_issuer, prod_env)
+
     cfg_ok = AppConfig(
         auth=AuthConfig(
             mcp_base_url="https://mcp.example.com",
+            oidc_issuer="https://id.example.com",
             allowed_user_subs=["user-1", " user-2 "],
         ),
         rules=rules,
@@ -191,10 +208,21 @@ def test_db_stores_multiple_recurring_completions_with_same_task_id(tmp_path: Pa
     assert len(db.get_completion_history(days=30)) == 2
 
 
-def test_auth_audience_list_and_rules_review_label_validation() -> None:
-    auth = AuthConfig(jwt_audience=[" https://mcp.example.com ", "", "client-id"])
+def test_auth_audience_list_jwks_and_algorithm_validation() -> None:
+    auth = AuthConfig(
+        jwt_audience=[" https://mcp.example.com ", "", "client-id"],
+        oidc_jwks_uri=" https://id.example.com/oauth2/v1/keys ",
+        jwt_algorithm="ES256",
+    )
     assert auth.jwt_audience == ["https://mcp.example.com", "client-id"]
-    assert AuthConfig(jwt_audience=["  "]).jwt_audience is None
+    assert auth.oidc_jwks_uri == "https://id.example.com/oauth2/v1/keys"
+    assert auth.jwt_algorithm == "ES256"
+    assert AuthConfig(jwt_audience=["  "], oidc_jwks_uri="  ").jwt_audience is None
+    assert AuthConfig(oidc_jwks_uri="  ").oidc_jwks_uri is None
+
+    for bad_alg in ("none", "HS256", " "):
+        with pytest.raises(ValueError, match="jwt_algorithm"):
+            AuthConfig(jwt_algorithm=bad_alg)
 
     with pytest.raises(ValueError, match="review_label"):
         RulesConfig(

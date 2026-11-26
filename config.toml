@@ -6,10 +6,14 @@ db_path = "data/autodoist.db"
 
 [auth]
 mcp_base_url = "https://todoist-mcp.example.com"
-pocket_id_issuer = "https://id.csigahaz.eu"
+oidc_issuer = "https://id.example.com"
+# Optional JWKS URL override (defaults to <oidc_issuer>/.well-known/jwks.json)
+# oidc_jwks_uri = ""
+# Asymmetric JWT signing algorithm (e.g. RS256, ES256)
+# jwt_algorithm = "RS256"
 # Optional expected JWT audience (string or list of strings; recommended once verified)
 # jwt_audience = ""
-# Pocket ID `sub` user IDs allowed to access the MCP server
+# OIDC `sub` user IDs allowed to access the MCP server
 allowed_user_subs = []
 
 [rules]
