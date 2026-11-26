@@ -2,8 +2,9 @@ from __future__ import annotations
 
 import json
 import sqlite3
-from collections.abc import Generator, Iterable
+from collections.abc import Generator, Iterable, Sequence
 from contextlib import contextmanager
+from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Literal
@@ -33,14 +34,25 @@ CREATE INDEX IF NOT EXISTS idx_completion_log_completed_at
 """
 
 
-def _normalize_timestamp(ts: datetime | str) -> str:
-    if isinstance(ts, str):
-        parsed = datetime.fromisoformat(ts.replace("Z", "+00:00"))
-    else:
-        parsed = ts
+@dataclass(frozen=True, slots=True)
+class CompletionRecord:
+    todoist_task_id: str | None
+    content: str
+    project_name: str
+    labels: list[str] | None = None
+    completed_at: datetime | str | None = None
+    source: CompletionSource = "todoist_sync"
+
+
+def parse_utc_timestamp(ts: datetime | str) -> datetime:
+    parsed = datetime.fromisoformat(ts) if isinstance(ts, str) else ts
     if parsed.tzinfo is None:
         parsed = parsed.replace(tzinfo=UTC)
-    return parsed.astimezone(UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
+    return parsed.astimezone(UTC)
+
+
+def normalize_timestamp(ts: datetime | str) -> str:
+    return parse_utc_timestamp(ts).strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
 class Database:
@@ -55,6 +67,7 @@ class Database:
         conn = sqlite3.connect(self.db_path)
         conn.row_factory = sqlite3.Row
         conn.execute("PRAGMA busy_timeout=5000")
+        conn.execute("PRAGMA synchronous=NORMAL")
         try:
             with conn:
                 yield conn
@@ -65,6 +78,10 @@ class Database:
         with self._connect() as conn:
             conn.execute("PRAGMA journal_mode=WAL")
             conn.executescript(SCHEMA_SQL)
+
+    def ping(self) -> None:
+        with self._connect() as conn:
+            conn.execute("SELECT 1")
 
     def get_sync_state(self) -> tuple[str, str | None]:
         with self._connect() as conn:
@@ -80,7 +97,7 @@ class Database:
         sync_token: str,
         last_synced_at: datetime | str | None = None,
     ) -> None:
-        ts = _normalize_timestamp(
+        ts = normalize_timestamp(
             datetime.now(UTC) if last_synced_at is None else last_synced_at
         )
         with self._connect() as conn:
@@ -95,6 +112,50 @@ class Database:
                 (sync_token, ts),
             )
 
+    def record_completions(self, records: Sequence[CompletionRecord]) -> int:
+        if not records:
+            return 0
+        inserted = 0
+        with self._connect() as conn:
+            for rec in records:
+                dt = parse_utc_timestamp(
+                    datetime.now(UTC) if rec.completed_at is None else rec.completed_at
+                )
+                ts = dt.strftime("%Y-%m-%dT%H:%M:%SZ")
+                if rec.todoist_task_id is not None:
+                    low = (dt - timedelta(seconds=60)).strftime("%Y-%m-%dT%H:%M:%SZ")
+                    high = (dt + timedelta(seconds=60)).strftime("%Y-%m-%dT%H:%M:%SZ")
+                    exists = conn.execute(
+                        """
+                        SELECT 1 FROM completion_log
+                        WHERE todoist_task_id = ? AND completed_at BETWEEN ? AND ?
+                        LIMIT 1
+                        """,
+                        (rec.todoist_task_id, low, high),
+                    ).fetchone()
+                    if exists is not None:
+                        continue
+
+                labels_json = json.dumps(sorted(set(rec.labels or [])))
+                cur = conn.execute(
+                    """
+                    INSERT OR IGNORE INTO completion_log (
+                        todoist_task_id, content, project_name, labels_json, completed_at, source
+                    ) VALUES (?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        rec.todoist_task_id,
+                        rec.content,
+                        rec.project_name,
+                        labels_json,
+                        ts,
+                        rec.source,
+                    ),
+                )
+                if cur.rowcount == 1:
+                    inserted += 1
+        return inserted
+
     def record_completion(
         self,
         *,
@@ -105,20 +166,21 @@ class Database:
         completed_at: datetime | str | None = None,
         source: CompletionSource,
     ) -> bool:
-        ts = _normalize_timestamp(
-            datetime.now(UTC) if completed_at is None else completed_at
-        )
-        labels_json = json.dumps(sorted(set(labels or [])))
-        with self._connect() as conn:
-            cur = conn.execute(
-                """
-                INSERT OR IGNORE INTO completion_log (
-                    todoist_task_id, content, project_name, labels_json, completed_at, source
-                ) VALUES (?, ?, ?, ?, ?, ?)
-                """,
-                (todoist_task_id, content, project_name, labels_json, ts, source),
+        return (
+            self.record_completions(
+                [
+                    CompletionRecord(
+                        todoist_task_id=todoist_task_id,
+                        content=content,
+                        project_name=project_name,
+                        labels=labels,
+                        completed_at=completed_at,
+                        source=source,
+                    )
+                ]
             )
-            return cur.rowcount == 1
+            == 1
+        )
 
     def get_completion_history(
         self,
@@ -129,7 +191,7 @@ class Database:
     ) -> list[dict[str, str]]:
         if not (1 <= days <= 365):
             raise ValueError("days must be between 1 and 365")
-        since = _normalize_timestamp(datetime.now(UTC) - timedelta(days=days))
+        since = normalize_timestamp(datetime.now(UTC) - timedelta(days=days))
         query = (
             "SELECT content, project_name, completed_at "
             "FROM completion_log WHERE completed_at >= ?"

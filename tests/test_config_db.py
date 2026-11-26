@@ -13,7 +13,7 @@ from src.config import (
     SyncConfig,
     validate_runtime_security,
 )
-from src.db import Database
+from src.db import CompletionRecord, Database
 
 
 def test_app_config_loads_default_toml() -> None:
@@ -190,28 +190,36 @@ def test_db_sync_state_and_completion_dedup(tmp_path: Path) -> None:
 def test_db_stores_multiple_recurring_completions_with_same_task_id(tmp_path: Path) -> None:
     db = Database(tmp_path / "rec.db")
     db.init_db()
+    db.ping()
     now = datetime.now(UTC)
 
-    assert (
-        db.record_completion(
-            todoist_task_id="rec-1",
-            content="Water plants",
-            project_name="Household",
-            completed_at=now - timedelta(days=7),
-            source="todoist_sync",
-        )
-        is True
+    # Batch insert with +-60s dedup tolerance (2s apart deduplicates, 7 days apart keeps both)
+    inserted = db.record_completions(
+        [
+            CompletionRecord(
+                todoist_task_id="rec-1",
+                content="Water plants",
+                project_name="Household",
+                completed_at=now - timedelta(days=7),
+                source="todoist_sync",
+            ),
+            CompletionRecord(
+                todoist_task_id="rec-1",
+                content="Water plants",
+                project_name="Household",
+                completed_at=now,
+                source="mcp_complete",
+            ),
+            CompletionRecord(
+                todoist_task_id="rec-1",
+                content="Water plants",
+                project_name="Household",
+                completed_at=now + timedelta(seconds=2),
+                source="todoist_sync",
+            ),
+        ]
     )
-    assert (
-        db.record_completion(
-            todoist_task_id="rec-1",
-            content="Water plants",
-            project_name="Household",
-            completed_at=now,
-            source="todoist_sync",
-        )
-        is True
-    )
+    assert inserted == 2
     assert len(db.get_completion_history(days=30)) == 2
 
 
