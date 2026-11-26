@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import json
 import sqlite3
+from collections.abc import Iterator
+from contextlib import contextmanager
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Literal
@@ -47,16 +49,21 @@ class Database:
     def __init__(self, db_path: str | Path) -> None:
         self.db_path = Path(db_path)
 
-    def _connect(self) -> sqlite3.Connection:
+    @contextmanager
+    def _connect(self) -> Iterator[sqlite3.Connection]:
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
         conn = sqlite3.connect(self.db_path)
         conn.row_factory = sqlite3.Row
-        conn.execute("PRAGMA journal_mode=WAL")
         conn.execute("PRAGMA busy_timeout=5000")
-        return conn
+        try:
+            with conn:
+                yield conn
+        finally:
+            conn.close()
 
     def init_db(self) -> None:
         with self._connect() as conn:
+            conn.execute("PRAGMA journal_mode=WAL")
             conn.executescript(SCHEMA_SQL)
 
     def get_sync_state(self) -> tuple[str, str | None]:
@@ -73,7 +80,9 @@ class Database:
         sync_token: str,
         last_synced_at: datetime | str | None = None,
     ) -> None:
-        ts = _normalize_timestamp(last_synced_at or datetime.now(UTC))
+        ts = _normalize_timestamp(
+            datetime.now(UTC) if last_synced_at is None else last_synced_at
+        )
         with self._connect() as conn:
             conn.execute(
                 """
@@ -96,7 +105,9 @@ class Database:
         completed_at: datetime | str | None = None,
         source: CompletionSource,
     ) -> bool:
-        ts = _normalize_timestamp(completed_at or datetime.now(UTC))
+        ts = _normalize_timestamp(
+            datetime.now(UTC) if completed_at is None else completed_at
+        )
         labels_json = json.dumps(sorted(set(labels or [])))
         with self._connect() as conn:
             cur = conn.execute(
@@ -115,6 +126,8 @@ class Database:
         days: int = 90,
         project: str | None = None,
     ) -> list[dict[str, str]]:
+        if not (1 <= days <= 365):
+            raise ValueError("days must be between 1 and 365")
         since = _normalize_timestamp(datetime.now(UTC) - timedelta(days=days))
         query = (
             "SELECT content, project_name, completed_at "
