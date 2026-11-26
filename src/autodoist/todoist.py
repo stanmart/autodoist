@@ -4,7 +4,9 @@ import json
 import time
 import uuid
 from collections.abc import Sequence
+from datetime import UTC, date, datetime
 from typing import Any
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 import httpx
 
@@ -12,25 +14,65 @@ from autodoist.models import (
     CaptureTaskInput,
     CreatedTaskOut,
     TodoistActivityEvent,
+    TodoistDue,
     TodoistProject,
     TodoistTask,
 )
 
 TODOIST_API_V1_BASE = "https://api.todoist.com/api/v1"
+MAX_SYNC_COMMANDS = 100
 
 
 class TodoistAPIError(RuntimeError):
     """Raised when Todoist returns an application-level /sync command error."""
 
 
+class AmbiguousProjectError(ValueError):
+    """Raised when a project name is shared by several active Todoist projects."""
+
+    def __init__(self, name: str) -> None:
+        super().__init__(
+            f"Project name {name!r} is shared by several Todoist projects; "
+            "rename one of them so the project allowlist is unambiguous"
+        )
+        self.name = name
+
+
+def shift_due_date(due: TodoistDue | None, new_date: str) -> dict[str, str]:
+    """Build `due` args that move a due date to `new_date` (YYYY-MM-DD), keeping any time."""
+    if due is None or not due.date or "T" not in due.date:
+        return {"date": new_date}
+    # Floating times are local already, so swapping the date prefix is enough.
+    floating = {"date": f"{new_date}{due.date[10:]}"}
+    if not due.date.endswith("Z") or not due.timezone:
+        return floating
+    # Fixed-timezone times are stored in UTC: swap the calendar date in local time.
+    try:
+        zone = ZoneInfo(due.timezone)
+        instant = datetime.fromisoformat(due.date)
+    except (ValueError, OSError, ZoneInfoNotFoundError):
+        return floating
+    target = date.fromisoformat(new_date)
+    local = instant.astimezone(zone).replace(
+        year=target.year, month=target.month, day=target.day
+    )
+    shifted = local.astimezone(UTC).strftime("%Y-%m-%dT%H:%M:%S.%fZ")
+    return {"date": shifted, "timezone": due.timezone}
+
+
 class ProjectCache:
-    """TTL-backed bi-directional mapping between active Todoist project IDs and names."""
+    """TTL-backed mapping between active Todoist project IDs and names.
+
+    Todoist allows several projects to share a name. Such names are tracked as ambiguous
+    and never resolve to an ID, so a name-based allowlist cannot match the wrong project.
+    """
 
     def __init__(self, ttl_seconds: float = 600.0) -> None:
         self._ttl_seconds = ttl_seconds
         self._loaded_at: float | None = None
         self._by_id: dict[str, str] = {}
         self._by_name: dict[str, str] = {}
+        self._ambiguous_names: frozenset[str] = frozenset()
 
     def is_fresh(self) -> bool:
         if self._loaded_at is None:
@@ -40,17 +82,27 @@ class ProjectCache:
     def replace(self, projects: Sequence[TodoistProject]) -> None:
         by_id: dict[str, str] = {}
         by_name: dict[str, str] = {}
+        ambiguous: set[str] = set()
         for proj in projects:
             if proj.is_deleted or proj.is_archived:
                 continue
             by_id[proj.id] = proj.name
+            if proj.name in by_name and by_name[proj.name] != proj.id:
+                ambiguous.add(proj.name)
             by_name[proj.name] = proj.id
+        for name in ambiguous:
+            del by_name[name]
         self._by_id = by_id
         self._by_name = by_name
+        self._ambiguous_names = frozenset(ambiguous)
         self._loaded_at = time.monotonic()
 
     def get_id(self, name: str) -> str | None:
+        """Return the ID for a uniquely named project, or None if unknown or ambiguous."""
         return self._by_name.get(name)
+
+    def is_ambiguous(self, name: str) -> bool:
+        return name in self._ambiguous_names
 
     def get_name(self, project_id: str) -> str | None:
         return self._by_id.get(project_id)
@@ -105,9 +157,15 @@ class TodoistClient:
         if pid is None and not refreshed:
             await self.refresh_projects(force=True)
             pid = self._projects.get_id(name)
+        if self._projects.is_ambiguous(name):
+            raise AmbiguousProjectError(name)
         if pid is None:
             raise ValueError(f"Project {name!r} not found in Todoist")
         return pid
+
+    def is_ambiguous_project_name(self, name: str) -> bool:
+        """Whether several active projects share this name (as of the last refresh)."""
+        return self._projects.is_ambiguous(name)
 
     def get_project_name(self, project_id: str) -> str | None:
         return self._projects.get_name(project_id)
@@ -117,7 +175,10 @@ class TodoistClient:
             return None
         refreshed = await self.refresh_projects()
         name = self._projects.get_name(project_id)
-        if name is None and not refreshed:
+        # Re-check Todoist before reporting a project as unknown or its name as ambiguous,
+        # so a rename takes effect on the next call instead of after the cache TTL.
+        stale = name is None or self._projects.is_ambiguous(name)
+        if stale and not refreshed:
             await self.refresh_projects(force=True)
             name = self._projects.get_name(project_id)
         return name
@@ -187,10 +248,12 @@ class TodoistClient:
             )
             temp_meta.append((temp_id, item))
 
-        data = await self._post_sync(commands=commands)
-        self._raise_on_sync_errors(data)
+        mapping: dict[str, Any] = {}
+        for start in range(0, len(commands), MAX_SYNC_COMMANDS):
+            data = await self._post_sync(commands=commands[start : start + MAX_SYNC_COMMANDS])
+            self._raise_on_sync_errors(data)
+            mapping.update(data.get("temp_id_mapping") or {})
 
-        mapping = data.get("temp_id_mapping", {})
         return [
             CreatedTaskOut(
                 id=str(mapping.get(temp_id, "")),
@@ -215,17 +278,13 @@ class TodoistClient:
 
         if new_due_date is not None:
             due = existing_task.due
+            due_payload: dict[str, Any] = dict(shift_due_date(due, new_due_date))
             if due is not None and due.is_recurring and due.string:
-                due_payload: dict[str, Any] = {
-                    "date": new_due_date,
-                    "string": due.string,
-                    "is_recurring": True,
-                }
+                due_payload["string"] = due.string
+                due_payload["is_recurring"] = True
                 if due.lang:
                     due_payload["lang"] = due.lang
-                update_args["due"] = due_payload
-            else:
-                update_args["due"] = {"date": new_due_date}
+            update_args["due"] = due_payload
 
         if labels is not None:
             update_args["labels"] = list(labels)

@@ -29,6 +29,7 @@ class TodoistDue(BaseModel):
     string: str | None = None
     is_recurring: bool = False
     lang: str | None = None
+    timezone: str | None = None
 
 
 class TodoistProject(BaseModel):

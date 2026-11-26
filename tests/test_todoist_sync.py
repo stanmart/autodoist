@@ -14,7 +14,15 @@ import respx
 from autodoist.db import Database
 from autodoist.models import CaptureTaskInput, TodoistDue, TodoistProject, TodoistTask
 from autodoist.sync_worker import run_sync, sync_loop
-from autodoist.todoist import TODOIST_API_V1_BASE, ProjectCache, TodoistAPIError, TodoistClient
+from autodoist.todoist import (
+    MAX_SYNC_COMMANDS,
+    TODOIST_API_V1_BASE,
+    AmbiguousProjectError,
+    ProjectCache,
+    TodoistAPIError,
+    TodoistClient,
+    shift_due_date,
+)
 
 
 def _iso(dt: datetime) -> str:
@@ -604,3 +612,216 @@ async def test_run_sync_records_missing_completed_at_once_without_relogging(
         assert len(db.get_completion_history(days=30)) == 2
     finally:
         await client.aclose()
+
+
+def test_project_cache_never_resolves_a_duplicated_name() -> None:
+    cache = ProjectCache()
+    cache.replace(
+        [
+            TodoistProject(id="p1", name="Personal"),
+            TodoistProject(id="p2", name="Personal"),
+            TodoistProject(id="p3", name="Household"),
+            TodoistProject(id="p4", name="Household", is_archived=True),
+        ]
+    )
+    assert cache.is_ambiguous("Personal")
+    assert cache.get_id("Personal") is None
+    assert cache.get_name("p1") == cache.get_name("p2") == "Personal"
+    # An archived namesake does not make the active project ambiguous.
+    assert not cache.is_ambiguous("Household")
+    assert cache.get_id("Household") == "p3"
+
+    cache.replace([TodoistProject(id="p1", name="Personal")])
+    assert not cache.is_ambiguous("Personal")
+    assert cache.get_id("Personal") == "p1"
+
+
+@respx.mock
+async def test_get_project_id_raises_for_a_duplicated_name() -> None:
+    respx.get(f"{TODOIST_API_V1_BASE}/projects").mock(
+        return_value=httpx.Response(
+            200,
+            json={
+                "results": [
+                    {"id": "p1", "name": "Personal"},
+                    {"id": "p2", "name": "Personal"},
+                ],
+                "next_cursor": None,
+            },
+        )
+    )
+    client = TodoistClient("test-token")
+    try:
+        with pytest.raises(AmbiguousProjectError):
+            await client.get_project_id("Personal")
+        with pytest.raises(ValueError, match="not found"):
+            await client.get_project_id("Missing")
+    finally:
+        await client.aclose()
+
+
+@pytest.mark.parametrize(
+    ("due", "new_date", "expected"),
+    [
+        (None, "2026-12-05", {"date": "2026-12-05"}),
+        (TodoistDue(date="2026-11-30"), "2026-12-05", {"date": "2026-12-05"}),
+        # Floating time: keep the wall-clock time as is.
+        (
+            TodoistDue(date="2026-11-30T09:00:00.000000"),
+            "2026-12-05",
+            {"date": "2026-12-05T09:00:00.000000"},
+        ),
+        # Fixed zone, 00:30 in Madrid is 23:30 UTC the day before: the local date moves.
+        (
+            TodoistDue(date="2026-11-29T23:30:00.000000Z", timezone="Europe/Madrid"),
+            "2026-12-05",
+            {"date": "2026-12-04T23:30:00.000000Z", "timezone": "Europe/Madrid"},
+        ),
+        # Fixed zone across a DST change: 09:00 local stays 09:00 local.
+        (
+            TodoistDue(date="2026-10-20T07:00:00.000000Z", timezone="Europe/Madrid"),
+            "2026-10-27",
+            {"date": "2026-10-27T08:00:00.000000Z", "timezone": "Europe/Madrid"},
+        ),
+        # A zone key that is a directory raises OSError inside zoneinfo.
+        (
+            TodoistDue(date="2026-11-30T09:00:00Z", timezone="America"),
+            "2026-12-05",
+            {"date": "2026-12-05T09:00:00Z"},
+        ),
+        # Unknown zone: fall back to swapping the date prefix.
+        (
+            TodoistDue(date="2026-11-30T09:00:00Z", timezone="Not/AZone"),
+            "2026-12-05",
+            {"date": "2026-12-05T09:00:00Z"},
+        ),
+    ],
+)
+def test_shift_due_date_keeps_the_time_of_day(
+    due: TodoistDue | None, new_date: str, expected: dict[str, str]
+) -> None:
+    assert shift_due_date(due, new_date) == expected
+
+
+@respx.mock
+async def test_update_task_keeps_time_and_recurrence_when_rescheduling() -> None:
+    sync_route = respx.post(f"{TODOIST_API_V1_BASE}/sync").mock(
+        side_effect=lambda req: httpx.Response(
+            200,
+            json={"sync_status": {cmd["uuid"]: "ok" for cmd in _parse_sync_commands(req)}},
+        )
+    )
+    client = TodoistClient("test-token")
+    existing = TodoistTask(
+        id="t1",
+        project_id="p1",
+        due=TodoistDue(
+            date="2026-11-30T09:00:00.000000",
+            string="every mon at 9",
+            is_recurring=True,
+            lang="en",
+        ),
+    )
+    try:
+        await client.update_task("t1", existing, new_due_date="2026-12-07")
+    finally:
+        await client.aclose()
+
+    assert _parse_sync_commands(sync_route.calls[0].request)[0]["args"]["due"] == {
+        "date": "2026-12-07T09:00:00.000000",
+        "string": "every mon at 9",
+        "is_recurring": True,
+        "lang": "en",
+    }
+
+
+@respx.mock
+async def test_batch_add_tasks_splits_requests_at_the_sync_command_limit() -> None:
+    respx.get(f"{TODOIST_API_V1_BASE}/projects").mock(
+        return_value=httpx.Response(
+            200, json={"results": [{"id": "p1", "name": "Personal"}], "next_cursor": None}
+        )
+    )
+    sync_route = respx.post(f"{TODOIST_API_V1_BASE}/sync").mock(
+        side_effect=lambda req: httpx.Response(
+            200,
+            json={
+                "sync_status": {cmd["uuid"]: "ok" for cmd in _parse_sync_commands(req)},
+                "temp_id_mapping": {
+                    cmd["temp_id"]: f"real-{cmd['args']['content']}"
+                    for cmd in _parse_sync_commands(req)
+                },
+            },
+        )
+    )
+    total = 2 * MAX_SYNC_COMMANDS + 5
+    items = [CaptureTaskInput(content=f"task-{i}", project="Personal") for i in range(total)]
+    client = TodoistClient("test-token")
+    try:
+        created = await client.batch_add_tasks(items)
+    finally:
+        await client.aclose()
+
+    sizes = [len(_parse_sync_commands(call.request)) for call in sync_route.calls]
+    assert sizes == [MAX_SYNC_COMMANDS, MAX_SYNC_COMMANDS, 5]
+    assert [c.id for c in created] == [f"real-task-{i}" for i in range(total)]
+
+
+@respx.mock
+async def test_run_sync_skips_allowed_names_shared_by_several_projects(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    db = Database(tmp_path / "autodoist.db")
+    db.init_db()
+    respx.get(f"{TODOIST_API_V1_BASE}/projects").mock(
+        return_value=httpx.Response(
+            200,
+            json={
+                "results": [
+                    {"id": "p1", "name": "Personal"},
+                    {"id": "p2", "name": "Personal"},
+                    {"id": "p3", "name": "Household"},
+                ],
+                "next_cursor": None,
+            },
+        )
+    )
+    done_at = _iso(datetime.now(UTC) - timedelta(minutes=5))
+    respx.post(f"{TODOIST_API_V1_BASE}/sync").mock(
+        return_value=httpx.Response(
+            200,
+            json={
+                "sync_token": "tok-1",
+                "items": [
+                    {
+                        "id": "t-shadow",
+                        "content": "Shadow",
+                        "project_id": "p2",
+                        "checked": True,
+                        "completed_at": done_at,
+                    },
+                    {
+                        "id": "t-house",
+                        "content": "Mop",
+                        "project_id": "p3",
+                        "checked": True,
+                        "completed_at": done_at,
+                    },
+                ],
+            },
+        )
+    )
+    respx.get(f"{TODOIST_API_V1_BASE}/activities").mock(
+        return_value=httpx.Response(200, json={"results": [], "next_cursor": None})
+    )
+
+    client = TodoistClient("test-token")
+    try:
+        with caplog.at_level("WARNING", logger="autodoist.sync_worker"):
+            summary = await run_sync(db, client, ["Personal", "Household"])
+    finally:
+        await client.aclose()
+
+    assert summary["inserted_completions"] == 1
+    assert [r.content for r in db.get_completion_history(days=7)] == ["Mop"]
+    assert "Personal" in caplog.text

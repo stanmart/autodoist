@@ -6,8 +6,8 @@ A lean MCP server and mini-backend sitting between an MCP client (e.g. **Gemini*
 
 - `get_tasks_by_synergy`: Fetch active tasks within allowed projects, grouped by synergy label and sorted by priority/due date.
 - `capture_items`: Batch-create tasks (enforcing capture project allowlist, duplicate skipping, and mandatory `review` label) or log `post_hoc` completions directly to SQLite (with retry dedup).
-- `update_or_reschedule`: Safely update labels/priority/project or move due dates while preserving recurrence and keeping `review` unless `clear_review_flag=true`.
-- `complete_task`: Close an allowed task in Todoist and immediately log it in `completion_log`.
+- `update_or_reschedule`: Safely update labels/priority/project or move due dates while preserving recurrence, the time of day, and `review` unless `clear_review_flag=true`. `labels` replaces only labels in `allowed_labels`; labels set by hand in Todoist are kept.
+- `complete_task`: Close an allowed task in Todoist and immediately log it in `completion_log`. Completing an already completed task is a no-op.
 - `get_completion_history`: Query up to 365 days of completion history from SQLite.
 
 ## Configuration
@@ -18,6 +18,8 @@ Non-secret settings live in `config.toml` (copy from [config.example.toml](confi
 - `[auth]`: `mcp_base_url`, `oidc_issuer`, optional `oidc_jwks_uri`, `jwt_algorithm` (default `RS256`), `jwt_audience` (required when `AUTH_DISABLED=false`), `allowed_user_subs`
 - `[sync]`: `interval_minutes` (default `30`; `0` disables background sync)
 - `[rules]`: `allowed_projects`, `capture_projects`, `allowed_labels`, `synergy_labels`, `review_label`, `timezone` (default `UTC`)
+
+Projects are allowlisted by name. Todoist lets several projects share a name, so if an allowlisted name matches more than one active project, every tool call that reads or writes Todoist tasks in it is rejected until one of them is renamed. Background sync skips it meanwhile, so completions made in that period are not added to the history.
 
 Secrets live in `.env` (see [.env.example](.env.example)):
 

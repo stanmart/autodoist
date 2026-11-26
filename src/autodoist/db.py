@@ -120,6 +120,8 @@ class Database:
             return 0
         inserted = 0
         with self._connect() as conn:
+            # Take the write lock up front so the duplicate checks and inserts are atomic.
+            conn.execute("BEGIN IMMEDIATE")
             for rec in records:
                 if rec.timestamp_estimated and rec.todoist_task_id is not None:
                     already_logged = conn.execute(
