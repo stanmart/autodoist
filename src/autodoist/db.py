@@ -44,6 +44,7 @@ class CompletionRecord:
     labels: list[str] | None = None
     completed_at: datetime | str | None = None
     source: CompletionSource = "todoist_sync"
+    timestamp_estimated: bool = False
 
 
 def parse_utc_timestamp(ts: datetime | str) -> datetime:
@@ -120,6 +121,14 @@ class Database:
         inserted = 0
         with self._connect() as conn:
             for rec in records:
+                if rec.timestamp_estimated and rec.todoist_task_id is not None:
+                    already_logged = conn.execute(
+                        "SELECT 1 FROM completion_log WHERE todoist_task_id = ? LIMIT 1",
+                        (rec.todoist_task_id,),
+                    ).fetchone()
+                    if already_logged is not None:
+                        continue
+
                 dt = parse_utc_timestamp(
                     datetime.now(UTC) if rec.completed_at is None else rec.completed_at
                 )

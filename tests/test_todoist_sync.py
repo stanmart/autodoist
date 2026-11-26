@@ -541,7 +541,9 @@ async def test_sync_loop_recovers_from_transient_error_and_cancels_cleanly(
 
 
 @respx.mock
-async def test_run_sync_skips_items_and_events_missing_completed_at(tmp_path: Path) -> None:
+async def test_run_sync_records_missing_completed_at_once_without_relogging(
+    tmp_path: Path,
+) -> None:
     db = Database(tmp_path / "missing_ts.db")
     db.init_db()
 
@@ -588,9 +590,17 @@ async def test_run_sync_skips_items_and_events_missing_completed_at(tmp_path: Pa
 
     client = TodoistClient("test-token")
     try:
-        summary = await run_sync(db, client, ["Personal"])
+        first = await run_sync(db, client, ["Personal"])
+        assert first["inserted_completions"] == 2
+        assert {r.content for r in db.get_completion_history(days=30)} == {
+            "Checked without timestamp",
+            "Activity without timestamp",
+        }
+
+        # Reappearing in a later delta with a new sync timestamp does not re-log
+        await asyncio.sleep(0.05)
+        second = await run_sync(db, client, ["Personal"])
+        assert second["inserted_completions"] == 0
+        assert len(db.get_completion_history(days=30)) == 2
     finally:
         await client.aclose()
-
-    assert summary["inserted_completions"] == 0
-    assert db.get_completion_history(days=30) == []
