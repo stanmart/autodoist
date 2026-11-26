@@ -10,34 +10,10 @@ from typing import Any
 import httpx
 
 from src.config import load_config
-from src.db import Database
+from src.db import CompletionRecord, Database, normalize_timestamp, parse_utc_timestamp
 from src.todoist import TodoistClient
 
 logger = logging.getLogger(__name__)
-
-
-def _iso_utc(dt: datetime) -> str:
-    return dt.astimezone(UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
-
-
-def _parse_iso_utc(raw: str) -> datetime:
-    parsed = datetime.fromisoformat(raw.replace("Z", "+00:00"))
-    if parsed.tzinfo is None:
-        parsed = parsed.replace(tzinfo=UTC)
-    return parsed.astimezone(UTC)
-
-
-async def _resolve_project_name(
-    todoist: TodoistClient,
-    project_id: str,
-    refreshed: list[bool],
-) -> str | None:
-    name = todoist.get_project_name(project_id)
-    if name is None and not refreshed[0]:
-        await todoist.ensure_projects_loaded(force_refresh=True)
-        refreshed[0] = True
-        name = todoist.get_project_name(project_id)
-    return name
 
 
 async def run_sync(
@@ -45,86 +21,85 @@ async def run_sync(
     todoist: TodoistClient,
     allowed_projects: Iterable[str],
 ) -> dict[str, Any]:
-    """Perform incremental /sync + best-effort completed-tasks fetch into completion_log."""
+    """Perform incremental /sync + best-effort activity-log pull into completion_log."""
     allowed_set = set(allowed_projects)
-    sync_token, last_synced_at = db.get_sync_state()
+    sync_token, last_synced_at = await asyncio.to_thread(db.get_sync_state)
 
     sync_data = await todoist.sync_incremental(sync_token)
     await todoist.ensure_projects_loaded()
 
     now = datetime.now(UTC)
-    now_iso = _iso_utc(now)
-    inserted = 0
-    refreshed_projects = [sync_token == "*"]
+    now_iso = normalize_timestamp(now)
+    records: list[CompletionRecord] = []
 
     for item in sync_data.get("items") or []:
         if item.get("is_deleted") or not item.get("checked"):
             continue
         project_id = str(item.get("project_id") or "")
-        project_name = await _resolve_project_name(todoist, project_id, refreshed_projects)
+        project_name = await todoist.resolve_project_name(project_id)
         if project_name not in allowed_set:
             continue
-        completed_at = item.get("completed_at") or now_iso
-        was_inserted = db.record_completion(
-            todoist_task_id=str(item["id"]),
-            content=str(item.get("content") or ""),
-            project_name=project_name,
-            labels=[str(lbl) for lbl in (item.get("labels") or [])],
-            completed_at=completed_at,
-            source="todoist_sync",
+        records.append(
+            CompletionRecord(
+                todoist_task_id=str(item["id"]),
+                content=str(item.get("content") or ""),
+                project_name=project_name,
+                labels=[str(lbl) for lbl in (item.get("labels") or [])],
+                completed_at=item.get("completed_at") or now_iso,
+                source="todoist_sync",
+            )
         )
-        if was_inserted:
-            inserted += 1
 
-    # Best-effort completed-tasks pull (captures recurring completions when supported by plan)
+    # Best-effort activity-log pull (captures recurring completions when supported by plan)
     lookback_limit = now - timedelta(days=90)
     if last_synced_at:
-        since_dt = max(_parse_iso_utc(last_synced_at) - timedelta(hours=1), lookback_limit)
+        since_dt = max(parse_utc_timestamp(last_synced_at) - timedelta(hours=1), lookback_limit)
     else:
         since_dt = now - timedelta(days=7)
 
-    completed_endpoint_ok = True
+    activities_endpoint_ok = True
     try:
-        completed_items = await todoist.get_completed_tasks(_iso_utc(since_dt), now_iso)
+        events = await todoist.get_completed_activities(normalize_timestamp(since_dt), now_iso)
     except httpx.HTTPStatusError as exc:
         if exc.response.status_code in (402, 403):
             logger.warning(
-                "Todoist completed-tasks endpoint returned %s; skipping recurring pull",
+                "Todoist activities endpoint returned %s; skipping recurring pull",
                 exc.response.status_code,
             )
-            completed_endpoint_ok = False
-            completed_items = []
+            activities_endpoint_ok = False
+            events = []
         else:
             raise
 
-    for item in completed_items:
-        task_id = item.get("task_id") or item.get("id")
+    for event in events:
+        extra = event.get("extra_data") or {}
+        task_id = event.get("object_id") or extra.get("item_id")
         if not task_id:
             continue
-        project_id = str(item.get("project_id") or "")
-        project_name = await _resolve_project_name(todoist, project_id, refreshed_projects)
+        project_id = str(event.get("parent_project_id") or extra.get("project_id") or "")
+        project_name = await todoist.resolve_project_name(project_id)
         if project_name not in allowed_set:
             continue
-        completed_at = item.get("completed_at") or now_iso
-        was_inserted = db.record_completion(
-            todoist_task_id=str(task_id),
-            content=str(item.get("content") or ""),
-            project_name=project_name,
-            labels=[str(lbl) for lbl in (item.get("labels") or [])],
-            completed_at=completed_at,
-            source="todoist_sync",
+        records.append(
+            CompletionRecord(
+                todoist_task_id=str(task_id),
+                content=str(extra.get("content") or event.get("content") or ""),
+                project_name=project_name,
+                labels=[],
+                completed_at=event.get("event_date") or now_iso,
+                source="todoist_sync",
+            )
         )
-        if was_inserted:
-            inserted += 1
 
+    inserted = await asyncio.to_thread(db.record_completions, records)
     raw_new_token = sync_data.get("sync_token")
     new_token = str(raw_new_token) if raw_new_token else sync_token
-    db.update_sync_state(new_token, now)
+    await asyncio.to_thread(db.update_sync_state, new_token, now)
 
     return {
         "inserted_completions": inserted,
         "sync_token_updated": bool(raw_new_token) and str(raw_new_token) != sync_token,
-        "completed_endpoint_ok": completed_endpoint_ok,
+        "activities_endpoint_ok": activities_endpoint_ok,
     }
 
 

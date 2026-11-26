@@ -555,8 +555,8 @@ def test_server_lifespan_runs_background_sync_and_cancels_cleanly(tmp_path: Path
             },
         )
     )
-    respx.get(f"{TODOIST_API_V1_BASE}/tasks/completed/by_completion_date").mock(
-        return_value=httpx.Response(200, json={"items": [], "next_cursor": None})
+    respx.get(f"{TODOIST_API_V1_BASE}/activities").mock(
+        return_value=httpx.Response(200, json={"results": [], "next_cursor": None})
     )
 
     cfg, env = _make_config(tmp_path, auth_disabled=True, sync_interval_minutes=30)
