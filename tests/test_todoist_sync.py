@@ -683,6 +683,12 @@ async def test_get_project_id_raises_for_a_duplicated_name() -> None:
             "2026-10-27",
             {"date": "2026-10-27T08:00:00.000000Z", "timezone": "Europe/Madrid"},
         ),
+        # A zone key that is a directory raises OSError inside zoneinfo.
+        (
+            TodoistDue(date="2026-11-30T09:00:00Z", timezone="America"),
+            "2026-12-05",
+            {"date": "2026-12-05T09:00:00Z"},
+        ),
         # Unknown zone: fall back to swapping the date prefix.
         (
             TodoistDue(date="2026-11-30T09:00:00Z", timezone="Not/AZone"),

@@ -50,7 +50,7 @@ def shift_due_date(due: TodoistDue | None, new_date: str) -> dict[str, str]:
     try:
         zone = ZoneInfo(due.timezone)
         instant = datetime.fromisoformat(due.date)
-    except (ValueError, ZoneInfoNotFoundError):
+    except (ValueError, OSError, ZoneInfoNotFoundError):
         return floating
     target = date.fromisoformat(new_date)
     local = instant.astimezone(zone).replace(
@@ -175,7 +175,10 @@ class TodoistClient:
             return None
         refreshed = await self.refresh_projects()
         name = self._projects.get_name(project_id)
-        if name is None and not refreshed:
+        # Re-check Todoist before reporting a project as unknown or its name as ambiguous,
+        # so a rename takes effect on the next call instead of after the cache TTL.
+        stale = name is None or self._projects.is_ambiguous(name)
+        if stale and not refreshed:
             await self.refresh_projects(force=True)
             name = self._projects.get_name(project_id)
         return name

@@ -219,7 +219,7 @@ def create_server(
 
     @mcp.tool()
     async def complete_task(task_id: str) -> CompleteTaskResult:
-        """Mark a task completed in Todoist and immediately log it in completion_log."""
+        """Mark a task completed in Todoist and log it; a no-op if it is already completed."""
         _require_authorized_user(app_config, env)
         return await service.complete_task(task_id)
 

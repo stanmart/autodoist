@@ -29,10 +29,19 @@ async def run_sync(
     ambiguous = sorted(name for name in allowed_set if todoist.is_ambiguous_project_name(name))
     if ambiguous:
         logger.warning(
-            "Allowed project names shared by several Todoist projects are skipped: %s",
+            "Allowed project names shared by several Todoist projects: %s. "
+            "Completions in them are not recorded until one is renamed",
             ambiguous,
         )
-        allowed_set -= set(ambiguous)
+
+    def allowed_project_name(project_id: str) -> str | None:
+        # Checked per record: the client is shared with the tool handlers, which may
+        # refresh the project cache while this sync is awaiting Todoist.
+        name = todoist.get_project_name(project_id)
+        if name is None or name not in allowed_set:
+            return None
+        return None if todoist.is_ambiguous_project_name(name) else name
+
     new_token, items = await todoist.sync_incremental(sync_token)
 
     now = datetime.now(UTC)
@@ -42,8 +51,8 @@ async def run_sync(
     for item in items:
         if item.is_deleted or not item.checked:
             continue
-        project_name = todoist.get_project_name(item.project_id)
-        if project_name not in allowed_set:
+        project_name = allowed_project_name(item.project_id)
+        if project_name is None:
             continue
         estimated = not item.completed_at
         if estimated:
@@ -85,8 +94,8 @@ async def run_sync(
             raise
 
     for event in events:
-        project_name = todoist.get_project_name(event.project_id)
-        if project_name not in allowed_set:
+        project_name = allowed_project_name(event.project_id)
+        if project_name is None:
             continue
         estimated = not event.completed_at
         if estimated:

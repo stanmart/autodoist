@@ -999,3 +999,31 @@ def test_auth_disabled_logs_a_startup_warning(
     with caplog.at_level("WARNING", logger="autodoist.server"):
         create_server(cfg, env, todoist=TodoistClient("test-token"))
     assert "AUTH_DISABLED" in caplog.text
+
+
+@respx.mock
+async def test_renaming_a_duplicate_project_takes_effect_on_the_next_call(
+    tmp_path: Path,
+) -> None:
+    duplicated = [{"id": "p1", "name": "Personal"}, {"id": "p2", "name": "Personal"}]
+    renamed = [{"id": "p1", "name": "Personal"}, {"id": "p2", "name": "Archive"}]
+    respx.get(f"{TODOIST_API_V1_BASE}/projects").mock(
+        side_effect=[
+            httpx.Response(200, json={"results": duplicated, "next_cursor": None}),
+            httpx.Response(200, json={"results": renamed, "next_cursor": None}),
+        ]
+    )
+    _mock_task({"id": "t1", "content": "Real", "project_id": "p1", "labels": []})
+    respx.post(f"{TODOIST_API_V1_BASE}/tasks/t1/close").mock(return_value=httpx.Response(204))
+    cfg, env = _make_config(tmp_path)
+    todoist = TodoistClient("test-token")
+    mcp = create_server(cfg, env, todoist=todoist)
+    try:
+        async with Client(mcp) as client:
+            # Warm the cache with the duplicate; the rename must not wait for the TTL.
+            await todoist.refresh_projects()
+            assert todoist.is_ambiguous_project_name("Personal") is True
+            res = await _call_json(client, "complete_task", {"task_id": "t1"})
+            assert res["project"] == "Personal"
+    finally:
+        await todoist.aclose()
