@@ -13,6 +13,7 @@ dependencies = [
 
 [dependency-groups]
 dev = [
+    "pyrefly>=0.15",
     "pytest>=8.0",
     "pytest-asyncio>=0.25",
     "respx>=0.22",
@@ -23,6 +24,11 @@ dev = [
 asyncio_mode = "auto"
 asyncio_default_fixture_loop_scope = "function"
 pythonpath = ["."]
+
+[tool.pyrefly]
+project-includes = ["src", "tests"]
+search-path = ["."]
+python-version = "3.12"
 
 [tool.ruff]
 target-version = "py312"
