@@ -1,0 +1,29 @@
+services:
+  autodoist:
+    image: ghcr.io/stanmart/autodoist:latest
+    # Uncomment to build locally instead of pulling from GHCR:
+    # build: .
+    container_name: autodoist
+    restart: unless-stopped
+    env_file:
+      - .env
+    ports:
+      - "127.0.0.1:8000:8000"
+    volumes:
+      - autodoist_data:/app/data
+      - ./config.toml:/app/config.toml:ro
+    healthcheck:
+      test:
+        [
+          "CMD",
+          "python",
+          "-c",
+          "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/health', timeout=3)",
+        ]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+
+volumes:
+  autodoist_data:
