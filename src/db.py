@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import json
 import sqlite3
-from collections.abc import Iterator
+from collections.abc import Iterable, Iterator
 from contextlib import contextmanager
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -125,6 +125,7 @@ class Database:
         *,
         days: int = 90,
         project: str | None = None,
+        allowed_projects: Iterable[str] | None = None,
     ) -> list[dict[str, str]]:
         if not (1 <= days <= 365):
             raise ValueError("days must be between 1 and 365")
@@ -137,6 +138,13 @@ class Database:
         if project is not None:
             query += " AND project_name = ?"
             params.append(project)
+        elif allowed_projects is not None:
+            allowed_list = sorted(set(allowed_projects))
+            if not allowed_list:
+                return []
+            placeholders = ", ".join("?" for _ in allowed_list)
+            query += f" AND project_name IN ({placeholders})"
+            params.extend(allowed_list)
         query += " ORDER BY completed_at DESC"
 
         with self._connect() as conn:

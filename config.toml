@@ -7,7 +7,7 @@ db_path = "data/autodoist.db"
 [auth]
 mcp_base_url = "https://todoist-mcp.example.com"
 pocket_id_issuer = "https://id.csigahaz.eu"
-# Optional expected JWT audience (omit or leave empty if unused)
+# Optional expected JWT audience (string or list of strings; recommended once verified)
 # jwt_audience = ""
 # Pocket ID `sub` user IDs allowed to access the MCP server
 allowed_user_subs = []
