@@ -1,0 +1,9 @@
+# Project and label guardrails for autodoist.
+# Override path via AUTODOIST_CONFIG env var if mounted elsewhere.
+
+allowed_projects = ["Inbox", "Personal", "Household"]
+capture_projects = ["Personal", "Household"]
+
+allowed_labels = ["errands", "home", "admin", "15min", "review"]
+synergy_labels = ["errands", "home", "admin", "15min"]
+review_label = "review"
