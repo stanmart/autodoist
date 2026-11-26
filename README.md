@@ -33,11 +33,12 @@ cp .env.example .env
 uv run uvicorn src.server:create_app --factory --reload --port 8000
 ```
 
-Run tests and lint:
+Run tests, lint, and type-check:
 
 ```bash
 uv run pytest
 uv run ruff check .
+uv run pyrefly check
 ```
 
 ## Docker Compose Deployment

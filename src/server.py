@@ -70,7 +70,8 @@ class _AllowedUserASGIMiddleware:
         if scope["type"] == "http":
             user = scope.get("user")
             if isinstance(user, AuthenticatedUser):
-                sub = user.access_token.claims.get("sub")
+                claims = getattr(user.access_token, "claims", None)
+                sub = claims.get("sub") if isinstance(claims, dict) else None
                 if not isinstance(sub, str) or sub not in self.allowed_subs:
                     resp = JSONResponse(
                         {"error": "forbidden", "error_description": "User not in allowlist"},
@@ -418,7 +419,7 @@ def create_server(
         content = str(existing.get("content") or "")
         labels = [str(lbl) for lbl in (existing.get("labels") or [])]
         database.record_completion(
-            todoist_task_id=str(task_id),
+            todoist_task_id=task_id,
             content=content,
             project_name=project_name,
             labels=labels,
