@@ -5,10 +5,14 @@ description = "Slim Todoist MCP & mini-backend for Gemini"
 readme = "README.md"
 requires-python = ">=3.12"
 dependencies = [
-    "fastmcp>=2.0",
+    "fastmcp>=4.2,<5",
     "httpx>=0.28,<1.0",
+    "mcp>=2.3,<3",
     "pydantic>=2.0",
     "pydantic-settings>=2.0",
+    "starlette>=1.0",
+    "tzdata>=2024.1",
+    "uvicorn>=0.40",
 ]
 
 [dependency-groups]

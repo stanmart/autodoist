@@ -12,12 +12,13 @@ from src.config import (
     RulesConfig,
     SyncConfig,
     validate_runtime_security,
+    validate_todoist_token,
 )
 from src.db import CompletionRecord, Database
 
 
 def test_app_config_loads_default_toml() -> None:
-    cfg = AppConfig.from_toml(Path("config.toml"))
+    cfg = AppConfig.from_toml(Path("config.example.toml"))
     assert cfg.storage.db_path == "data/autodoist.db"
     assert cfg.auth.oidc_issuer == "https://id.example.com"
     assert cfg.auth.jwt_algorithm == "RS256"
@@ -25,6 +26,7 @@ def test_app_config_loads_default_toml() -> None:
     assert cfg.rules.allowed_projects == ["Inbox", "Personal", "Household"]
     assert cfg.rules.capture_projects == ["Personal", "Household"]
     assert cfg.rules.review_label == "review"
+    assert cfg.rules.timezone == "UTC"
 
 
 def test_app_config_rejects_invalid_subsets_and_unknown_keys(tmp_path: Path) -> None:
@@ -247,3 +249,17 @@ def test_auth_audience_list_jwks_and_algorithm_validation() -> None:
             synergy_labels=["errands"],
             review_label="review",
         )
+
+    with pytest.raises(ValueError, match="Invalid IANA timezone"):
+        RulesConfig(
+            allowed_projects=["Personal"],
+            capture_projects=["Personal"],
+            allowed_labels=["review"],
+            synergy_labels=[],
+            review_label="review",
+            timezone="Mars/Olympus",
+        )
+
+    with pytest.raises(ValueError, match="TODOIST_API_TOKEN"):
+        validate_todoist_token(EnvSettings(_env_file=None, todoist_api_token="  "))
+    validate_todoist_token(EnvSettings(_env_file=None, todoist_api_token="tok-ok"))
