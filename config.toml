@@ -1,0 +1,20 @@
+# Non-secret configuration for autodoist.
+# Override path via AUTODOIST_CONFIG env var if mounted elsewhere.
+
+[storage]
+db_path = "data/autodoist.db"
+
+[auth]
+mcp_base_url = "https://todoist-mcp.example.com"
+pocket_id_issuer = "https://id.csigahaz.eu"
+# Optional expected JWT audience (omit or leave empty if unused)
+# jwt_audience = ""
+# Pocket ID `sub` user IDs allowed to access the MCP server
+allowed_user_subs = []
+
+[rules]
+allowed_projects = ["Inbox", "Personal", "Household"]
+capture_projects = ["Personal", "Household"]
+allowed_labels = ["errands", "home", "admin", "15min", "review"]
+synergy_labels = ["errands", "home", "admin", "15min"]
+review_label = "review"
