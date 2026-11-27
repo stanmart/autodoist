@@ -83,6 +83,8 @@ class RoutineConfig(BaseModel):
 
     name: str = Field(min_length=1)
     due_within_days: int | None = Field(default=None, ge=0)
+    purpose: str = ""
+    capacity: str = ""
 
     @field_validator("name", mode="before")
     @classmethod
@@ -101,6 +103,7 @@ class RulesConfig(BaseModel):
     synergy_labels: list[str] = Field(default_factory=list)
     review_label: str = Field(min_length=1)
     someday_label: str | None = None
+    label_descriptions: dict[str, str] = Field(default_factory=dict)
     inbox_project: str = "Inbox"
     routines: list[RoutineConfig] = Field(default_factory=list)
     timezone: str = "UTC"
@@ -169,6 +172,12 @@ class RulesConfig(BaseModel):
         if self.someday_label is not None and self.someday_label not in allowed_label_set:
             raise ValueError(
                 f"someday_label {self.someday_label!r} must be present in allowed_labels"
+            )
+
+        unknown_described = sorted(set(self.label_descriptions) - allowed_label_set)
+        if unknown_described:
+            raise ValueError(
+                f"label_descriptions keys must be in allowed_labels; invalid: {unknown_described}"
             )
 
         routine_names = [routine.name for routine in self.routines]

@@ -25,6 +25,7 @@ from autodoist.config import (
     validate_todoist_token,
 )
 from autodoist.db import Database
+from autodoist.instructions import build_instructions
 from autodoist.models import (
     CaptureItem,
     CaptureResult,
@@ -162,6 +163,7 @@ def create_server(
 
     mcp = FastMCP(
         name="autodoist",
+        instructions=build_instructions(app_config.rules),
         auth=build_auth_provider(app_config, env, token_verifier=token_verifier),
         lifespan=_lifespan,
     )

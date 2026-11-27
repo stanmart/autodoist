@@ -11,6 +11,14 @@ A lean MCP server and mini-backend sitting between an MCP client (e.g. **Gemini*
 - `drop_task`: Delete an allowed task that will not be done. A snapshot is kept in the `dropped_tasks` SQLite table, and nothing is added to the completion history. Tasks with subtasks are refused.
 - `get_completion_history`: Query up to 365 days of completion history from SQLite.
 
+## Server instructions
+
+The server sends MCP `instructions` generated from `[rules]`: the allowed projects, each label's meaning, the routine slots, and a handful of house rules (triage, done versus dropped, what a due date means). Clients that honour them need no separate skill or prompt. For a client that ignores them, print the same text and paste it into a Gem, skill, or system prompt:
+
+```bash
+uv run python -m autodoist.instructions
+```
+
 ## Configuration
 
 Non-secret settings live in `config.toml` (copy from [config.example.toml](config.example.toml); `AUTODOIST_CONFIG` overrides the path):
@@ -19,7 +27,8 @@ Non-secret settings live in `config.toml` (copy from [config.example.toml](confi
 - `[auth]`: `mcp_base_url`, `oidc_issuer`, optional `oidc_jwks_uri`, `jwt_algorithm` (default `RS256`), `jwt_audience` (required when `AUTH_DISABLED=false`), `allowed_user_subs`
 - `[sync]`: `interval_minutes` (default `30`; `0` disables background sync)
 - `[rules]`: `allowed_projects`, `capture_projects`, `allowed_labels`, `synergy_labels`, `review_label`, optional `someday_label`, `inbox_project` (default `Inbox`), `timezone` (default `UTC`)
-- `[[rules.routines]]`: recurring slots for working through tasks. `name` is also the label that assigns a task to the slot (so it must be in `allowed_labels`); optional `due_within_days` makes the slot also include any task due within that window. The slot times live in your calendar, not here.
+- `[[rules.routines]]`: recurring slots for working through tasks. `name` is also the label that assigns a task to the slot (so it must be in `allowed_labels`); optional `due_within_days` makes the slot also include any task due within that window. Optional `purpose` and `capacity` are free text for the assistant. The slot times live in your calendar, not here.
+- `[rules.label_descriptions]`: optional one-line meaning per label.
 
 Projects are allowlisted by name. Todoist lets several projects share a name, so if an allowlisted name matches more than one active project, every tool call that reads or writes Todoist tasks in it is rejected until one of them is renamed. Background sync skips it meanwhile, so completions made in that period are not added to the history.
 
