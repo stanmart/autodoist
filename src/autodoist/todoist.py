@@ -270,7 +270,6 @@ class TodoistClient:
         *,
         new_due_date: str | None = None,
         due_string: str | None = None,
-        clear_due: bool = False,
         content: str | None = None,
         description: str | None = None,
         labels: list[str] | None = None,
@@ -285,11 +284,10 @@ class TodoistClient:
         if description is not None:
             update_args["description"] = description
 
-        if clear_due:
-            update_args["due"] = None
-        elif due_string is not None:
+        if due_string is not None:
             # Todoist parses the string, so this also sets or replaces a recurrence.
-            update_args["due"] = {"string": due_string}
+            clear = due_string.lower() == "no date"
+            update_args["due"] = None if clear else {"string": due_string}
         elif new_due_date is not None:
             due = existing_task.due
             due_payload: dict[str, Any] = dict(shift_due_date(due, new_due_date))

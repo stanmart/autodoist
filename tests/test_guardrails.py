@@ -101,6 +101,8 @@ async def test_only_the_safe_tools_are_registered(tmp_path: Path) -> None:
         "drop_task",
         "get_completion_history",
     }
+    # Output schemas are switched off to keep the advertised tool definitions small.
+    assert all(tool.output_schema is None for tool in tools)
 
 
 @respx.mock
@@ -217,7 +219,7 @@ async def test_capture_items_guardrails_review_tag_duplicates_and_post_hoc(
 
             history = (
                 await _call_json(client, "get_completion_history", {"days": 30})
-            )["result"]
+            )["completions"]
             assert len(history) == 1
             assert history[0]["content"] == "Bought oat milk"
     finally:
@@ -457,7 +459,7 @@ async def test_complete_task_and_history_project_isolation(tmp_path: Path) -> No
             assert res["completed"] is True
             history = (
                 await _call_json(client, "get_completion_history", {"days": 7})
-            )["result"]
+            )["completions"]
             assert [h["content"] for h in history] == ["Renew passport"]
     finally:
         await todoist.aclose()
@@ -1155,7 +1157,7 @@ async def test_drop_task_deletes_snapshots_and_stays_out_of_history(tmp_path: Pa
                 "project": "Personal",
                 "dropped": True,
             }
-            history = (await _call_json(client, "get_completion_history", {}))["result"]
+            history = (await _call_json(client, "get_completion_history", {}))["completions"]
             assert history == []
     finally:
         await todoist.aclose()
@@ -1169,29 +1171,6 @@ async def test_drop_task_deletes_snapshots_and_stays_out_of_history(tmp_path: Pa
     snapshot = json.loads(rows[0][3])
     assert snapshot["description"] == "Maybe one day"
     assert snapshot["labels"] == ["home"]
-
-
-@respx.mock
-async def test_drop_task_keeps_no_snapshot_when_the_delete_fails(tmp_path: Path) -> None:
-    _mock_projects([{"id": "p1", "name": "Personal"}])
-    _mock_task({"id": "t1", "content": "Learn the ukulele", "project_id": "p1"})
-    respx.get(f"{TODOIST_API_V1_BASE}/tasks").mock(
-        return_value=httpx.Response(200, json={"results": [], "next_cursor": None})
-    )
-    respx.delete(f"{TODOIST_API_V1_BASE}/tasks/t1").mock(return_value=httpx.Response(500))
-    cfg, env = _make_config(tmp_path)
-    todoist = TodoistClient("test-token")
-    mcp = create_server(cfg, env, todoist=todoist)
-
-    try:
-        async with Client(mcp) as client:
-            with pytest.raises(ToolError):
-                await client.call_tool("drop_task", {"task_id": "t1"})
-    finally:
-        await todoist.aclose()
-
-    with sqlite3.connect(cfg.storage.db_path) as conn:
-        assert conn.execute("SELECT COUNT(*) FROM dropped_tasks").fetchone() == (0,)
 
 
 @respx.mock

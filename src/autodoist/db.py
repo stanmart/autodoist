@@ -231,10 +231,10 @@ class Database:
         content: str,
         project_name: str,
         task_json: str,
-    ) -> int:
-        """Snapshot a task about to be deleted from Todoist; returns the snapshot row ID."""
+    ) -> None:
+        """Snapshot a task about to be deleted from Todoist."""
         with self._connect() as conn:
-            cur = conn.execute(
+            conn.execute(
                 """
                 INSERT INTO dropped_tasks (
                     todoist_task_id, content, project_name, task_json, dropped_at
@@ -248,11 +248,6 @@ class Database:
                     normalize_timestamp(datetime.now(UTC)),
                 ),
             )
-            return cur.lastrowid or 0
-
-    def discard_dropped_task(self, row_id: int) -> None:
-        with self._connect() as conn:
-            conn.execute("DELETE FROM dropped_tasks WHERE id = ?", (row_id,))
 
     def record_completion(
         self,
