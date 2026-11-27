@@ -47,8 +47,10 @@ class TodoistProject(BaseModel):
 class TodoistTask(BaseModel):
     id: str
     content: str = ""
+    description: str = ""
     project_id: str = ""
     project_name: str | None = None
+    parent_id: str | None = None
     labels: list[str] = Field(default_factory=list)
     priority: int = 1
     due: TodoistDue | None = None
@@ -61,7 +63,12 @@ class TodoistTask(BaseModel):
     def coerce_ids(cls, value: object) -> str:
         return "" if value is None else str(value)
 
-    @field_validator("content", mode="before")
+    @field_validator("parent_id", mode="before")
+    @classmethod
+    def coerce_parent_id(cls, value: object) -> str | None:
+        return None if value is None else str(value)
+
+    @field_validator("content", "description", mode="before")
     @classmethod
     def coerce_content(cls, value: object) -> str:
         return "" if value is None else str(value)
@@ -189,6 +196,13 @@ class CompleteTaskResult(BaseModel):
     content: str
     project: str
     completed: bool
+
+
+class DropTaskResult(BaseModel):
+    task_id: str
+    content: str
+    project: str
+    dropped: bool
 
 
 class CompletionHistoryItem(BaseModel):

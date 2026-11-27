@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import sqlite3
 import time
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -86,7 +87,7 @@ def _parse_sync_commands(req: httpx.Request) -> list[dict[str, Any]]:
     return commands
 
 
-async def test_only_five_safe_tools_are_registered(tmp_path: Path) -> None:
+async def test_only_the_safe_tools_are_registered(tmp_path: Path) -> None:
     cfg, env = _make_config(tmp_path)
     mcp = create_server(cfg, env)
     async with Client(mcp) as client:
@@ -97,6 +98,7 @@ async def test_only_five_safe_tools_are_registered(tmp_path: Path) -> None:
         "capture_items",
         "update_or_reschedule",
         "complete_task",
+        "drop_task",
         "get_completion_history",
     }
 
@@ -1027,3 +1029,144 @@ async def test_renaming_a_duplicate_project_takes_effect_on_the_next_call(
             assert res["project"] == "Personal"
     finally:
         await todoist.aclose()
+
+
+@respx.mock
+async def test_update_rewrites_content_notes_and_schedule(tmp_path: Path) -> None:
+    _mock_projects([{"id": "p1", "name": "Personal"}])
+    _mock_task(
+        {
+            "id": "t1",
+            "content": "diapers??",
+            "project_id": "p1",
+            "labels": [],
+            "due": {"date": "2026-11-20", "string": "every week", "is_recurring": True},
+        }
+    )
+    sync_route = _mock_sync_ok()
+    cfg, env = _make_config(tmp_path)
+    todoist = TodoistClient("test-token")
+    mcp = create_server(cfg, env, todoist=todoist)
+
+    try:
+        async with Client(mcp) as client:
+            await client.call_tool(
+                "update_or_reschedule",
+                {
+                    "task_id": "t1",
+                    "content": "  Buy diapers ",
+                    "notes": "Size 4",
+                    "due_string": "every 2 weeks on thu",
+                },
+            )
+            await client.call_tool(
+                "update_or_reschedule", {"task_id": "t1", "due_string": "No Date"}
+            )
+            with pytest.raises(ToolError, match="not both"):
+                await client.call_tool(
+                    "update_or_reschedule",
+                    {"task_id": "t1", "new_due_date": "2026-12-01", "due_string": "friday"},
+                )
+            with pytest.raises(ToolError, match="content must not be empty"):
+                await client.call_tool(
+                    "update_or_reschedule", {"task_id": "t1", "content": "  "}
+                )
+    finally:
+        await todoist.aclose()
+
+    assert len(sync_route.calls) == 2
+    first = _parse_sync_commands(sync_route.calls[0].request)[0]["args"]
+    assert first["content"] == "Buy diapers"
+    assert first["description"] == "Size 4"
+    # A due_string replaces the schedule outright, old recurrence included.
+    assert first["due"] == {"string": "every 2 weeks on thu"}
+    second = _parse_sync_commands(sync_route.calls[1].request)[0]["args"]
+    assert second["due"] is None
+
+
+@respx.mock
+async def test_drop_task_deletes_snapshots_and_stays_out_of_history(tmp_path: Path) -> None:
+    _mock_projects([{"id": "p1", "name": "Personal"}, {"id": "p9", "name": "HiddenWork"}])
+    _mock_task(
+        {
+            "id": "t1",
+            "content": "Learn the ukulele",
+            "description": "Maybe one day",
+            "project_id": "p1",
+            "labels": ["home"],
+        }
+    )
+    _mock_task({"id": "t2", "content": "Plan trip", "project_id": "p1", "labels": []})
+    _mock_task({"id": "t9", "content": "Secret work", "project_id": "p9", "labels": []})
+    respx.get(f"{TODOIST_API_V1_BASE}/tasks").mock(
+        return_value=httpx.Response(
+            200,
+            json={
+                "results": [
+                    {"id": "t1", "content": "Learn the ukulele", "project_id": "p1"},
+                    {"id": "t2", "content": "Plan trip", "project_id": "p1"},
+                    {"id": "t3", "content": "Book flights", "project_id": "p1", "parent_id": "t2"},
+                ],
+                "next_cursor": None,
+            },
+        )
+    )
+    delete_route = respx.delete(f"{TODOIST_API_V1_BASE}/tasks/t1").mock(
+        return_value=httpx.Response(204)
+    )
+    cfg, env = _make_config(tmp_path)
+    db = Database(cfg.storage.db_path)
+    todoist = TodoistClient("test-token")
+    mcp = create_server(cfg, env, db=db, todoist=todoist)
+
+    try:
+        async with Client(mcp) as client:
+            with pytest.raises(ToolError, match="outside allowed_projects"):
+                await client.call_tool("drop_task", {"task_id": "t9"})
+            with pytest.raises(ToolError, match="has subtasks"):
+                await client.call_tool("drop_task", {"task_id": "t2"})
+
+            res = await _call_json(client, "drop_task", {"task_id": "t1"})
+            assert res == {
+                "task_id": "t1",
+                "content": "Learn the ukulele",
+                "project": "Personal",
+                "dropped": True,
+            }
+            history = (await _call_json(client, "get_completion_history", {}))["result"]
+            assert history == []
+    finally:
+        await todoist.aclose()
+
+    assert delete_route.call_count == 1
+    with sqlite3.connect(cfg.storage.db_path) as conn:
+        rows = conn.execute(
+            "SELECT todoist_task_id, content, project_name, task_json FROM dropped_tasks"
+        ).fetchall()
+    assert [row[:3] for row in rows] == [("t1", "Learn the ukulele", "Personal")]
+    snapshot = json.loads(rows[0][3])
+    assert snapshot["description"] == "Maybe one day"
+    assert snapshot["labels"] == ["home"]
+
+
+@respx.mock
+async def test_drop_task_keeps_no_snapshot_when_the_delete_fails(tmp_path: Path) -> None:
+    _mock_projects([{"id": "p1", "name": "Personal"}])
+    _mock_task({"id": "t1", "content": "Learn the ukulele", "project_id": "p1"})
+    respx.get(f"{TODOIST_API_V1_BASE}/tasks").mock(
+        return_value=httpx.Response(200, json={"results": [], "next_cursor": None})
+    )
+    respx.delete(f"{TODOIST_API_V1_BASE}/tasks/t1").mock(return_value=httpx.Response(500))
+    cfg, env = _make_config(tmp_path)
+    todoist = TodoistClient("test-token")
+    mcp = create_server(cfg, env, todoist=todoist)
+
+    try:
+        async with Client(mcp) as client:
+            with pytest.raises(ToolError):
+                await client.call_tool("drop_task", {"task_id": "t1"})
+    finally:
+        await todoist.aclose()
+
+    with sqlite3.connect(cfg.storage.db_path) as conn:
+        assert conn.execute("SELECT COUNT(*) FROM dropped_tasks").fetchone() == (0,)

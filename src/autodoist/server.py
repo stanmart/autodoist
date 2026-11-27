@@ -30,6 +30,7 @@ from autodoist.models import (
     CaptureResult,
     CompleteTaskResult,
     CompletionHistoryItem,
+    DropTaskResult,
     TaskOut,
     UpdateTaskResult,
 )
@@ -197,7 +198,21 @@ def create_server(
     @mcp.tool()
     async def update_or_reschedule(
         task_id: str,
-        new_due_date: str | None = None,
+        content: str | None = None,
+        notes: str | None = None,
+        new_due_date: Annotated[
+            str | None,
+            Field(description="YYYY-MM-DD. Moves the date; recurrence and time are kept."),
+        ] = None,
+        due_string: Annotated[
+            str | None,
+            Field(
+                description=(
+                    "Natural-language due date that replaces the whole schedule, "
+                    "e.g. 'every 2 weeks on thu' or 'tomorrow 18:00'; 'no date' clears it."
+                )
+            ),
+        ] = None,
         labels: list[str] | None = None,
         priority: Annotated[
             int | None,
@@ -206,11 +221,14 @@ def create_server(
         project: str | None = None,
         clear_review_flag: bool = False,
     ) -> UpdateTaskResult:
-        """Safely edit a task or move its due date while preserving recurrence."""
+        """Edit a task: rewrite it, relabel, move it, reschedule, or set its recurrence."""
         _require_authorized_user(app_config, env)
         return await service.update_or_reschedule(
             task_id=task_id,
+            content=content,
+            notes=notes,
             new_due_date=new_due_date,
+            due_string=due_string,
             labels=labels,
             priority=priority,
             project=project,
@@ -222,6 +240,12 @@ def create_server(
         """Mark a task completed in Todoist and log it; a no-op if it is already completed."""
         _require_authorized_user(app_config, env)
         return await service.complete_task(task_id)
+
+    @mcp.tool()
+    async def drop_task(task_id: str) -> DropTaskResult:
+        """Delete a task that will not be done; it is not logged as a completion."""
+        _require_authorized_user(app_config, env)
+        return await service.drop_task(task_id)
 
     @mcp.tool()
     async def get_completion_history(

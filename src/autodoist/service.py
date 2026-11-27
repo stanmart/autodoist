@@ -13,6 +13,7 @@ from autodoist.models import (
     CaptureTaskInput,
     CompleteTaskResult,
     CompletionHistoryItem,
+    DropTaskResult,
     PostHocLoggedOut,
     SkippedDuplicateOut,
     TaskOut,
@@ -25,6 +26,7 @@ from autodoist.todoist import AmbiguousProjectError, TodoistClient
 
 _TASK_ID_RE = re.compile(r"[A-Za-z0-9_-]+")
 _ISO_DATE_RE = re.compile(r"\d{4}-\d{2}-\d{2}")
+_NO_DATE = "no date"
 
 
 def _validate_task_id(task_id: str) -> str:
@@ -228,12 +230,26 @@ class AutodoistService:
         *,
         task_id: str,
         new_due_date: str | None = None,
+        due_string: str | None = None,
+        content: str | None = None,
+        notes: str | None = None,
         labels: list[str] | None = None,
         priority: int | None = None,
         project: str | None = None,
         clear_review_flag: bool = False,
     ) -> UpdateTaskResult:
         _validate_task_id(task_id)
+        if content is not None:
+            content = content.strip()
+            if not content:
+                raise ValueError("content must not be empty")
+        if due_string is not None:
+            due_string = due_string.strip()
+            if not due_string:
+                raise ValueError("due_string must not be empty")
+            if new_due_date is not None:
+                raise ValueError("Pass either new_due_date or due_string, not both")
+        clear_due = due_string is not None and due_string.lower() == _NO_DATE
         if new_due_date is not None:
             if not _ISO_DATE_RE.fullmatch(new_due_date):
                 raise ValueError("new_due_date must use YYYY-MM-DD format")
@@ -278,6 +294,10 @@ class AutodoistService:
             task_id,
             existing,
             new_due_date=new_due_date,
+            due_string=None if clear_due else due_string,
+            clear_due=clear_due,
+            content=content,
+            description=notes,
             labels=final_labels,
             priority=api_priority,
             project_id=target_project_id,
@@ -317,6 +337,39 @@ class AutodoistService:
             source="mcp_complete",
         )
         return result
+
+    async def drop_task(self, task_id: str) -> DropTaskResult:
+        _validate_task_id(task_id)
+        existing = await self.todoist.get_task(task_id)
+        project_name = await self._require_allowed_task_project(task_id, existing.project_id)
+
+        # Deleting a parent deletes its subtasks too, and those would not be snapshotted.
+        siblings = await self.todoist.get_active_tasks(project_id=existing.project_id)
+        if any(t.parent_id == task_id for t in siblings):
+            raise ValueError(
+                f"Task {task_id!r} has subtasks; drop or move them before dropping it"
+            )
+
+        existing.project_name = project_name
+        row_id = await asyncio.to_thread(
+            self.db.record_dropped_task,
+            todoist_task_id=task_id,
+            content=existing.content,
+            project_name=project_name,
+            task_json=existing.model_dump_json(),
+        )
+        try:
+            await self.todoist.delete_task(task_id)
+        except BaseException:
+            # The task still exists, so the snapshot would be a false record.
+            await asyncio.to_thread(self.db.discard_dropped_task, row_id)
+            raise
+        return DropTaskResult(
+            task_id=task_id,
+            content=existing.content,
+            project=project_name,
+            dropped=True,
+        )
 
     async def get_completion_history(
         self,

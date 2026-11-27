@@ -2,12 +2,13 @@
 
 A lean MCP server and mini-backend sitting between an MCP client (e.g. **Gemini**) and **Todoist** (API v1), with code-enforced guardrails, OIDC / OAuth 2.1 (`RemoteAuthProvider` + `JWTVerifier`), and SQLite completion history.
 
-## MCP Tools (5)
+## MCP Tools (6)
 
 - `get_tasks_by_synergy`: Fetch active tasks within allowed projects, grouped by synergy label and sorted by priority/due date.
 - `capture_items`: Batch-create tasks (enforcing capture project allowlist, duplicate skipping, and mandatory `review` label) or log `post_hoc` completions directly to SQLite (with retry dedup).
-- `update_or_reschedule`: Safely update labels/priority/project or move due dates while preserving recurrence, the time of day, and `review` unless `clear_review_flag=true`. `labels` replaces only labels in `allowed_labels`; labels set by hand in Todoist are kept.
+- `update_or_reschedule`: Rewrite a task's `content`/`notes`, update labels/priority/project, or change its schedule. `new_due_date` moves the date while preserving recurrence and the time of day; `due_string` replaces the whole schedule (e.g. `every 2 weeks on thu`, or `no date` to clear it). `review` is kept unless `clear_review_flag=true`. `labels` replaces only labels in `allowed_labels`; labels set by hand in Todoist are kept.
 - `complete_task`: Close an allowed task in Todoist and immediately log it in `completion_log`. Completing an already completed task is a no-op.
+- `drop_task`: Delete an allowed task that will not be done. A snapshot is kept in the `dropped_tasks` SQLite table, and nothing is added to the completion history. Tasks with subtasks are refused.
 - `get_completion_history`: Query up to 365 days of completion history from SQLite.
 
 ## Configuration

@@ -33,6 +33,15 @@ CREATE TABLE IF NOT EXISTS completion_log (
 
 CREATE INDEX IF NOT EXISTS idx_completion_log_completed_at
     ON completion_log(completed_at);
+
+CREATE TABLE IF NOT EXISTS dropped_tasks (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    todoist_task_id TEXT NOT NULL,
+    content TEXT NOT NULL,
+    project_name TEXT NOT NULL,
+    task_json TEXT NOT NULL,
+    dropped_at TIMESTAMP NOT NULL
+);
 """
 
 
@@ -214,6 +223,36 @@ class Database:
                 (project_name, since),
             ).fetchall()
         return any(normalize_text(str(row["content"])) == target for row in rows)
+
+    def record_dropped_task(
+        self,
+        *,
+        todoist_task_id: str,
+        content: str,
+        project_name: str,
+        task_json: str,
+    ) -> int:
+        """Snapshot a task about to be deleted from Todoist; returns the snapshot row ID."""
+        with self._connect() as conn:
+            cur = conn.execute(
+                """
+                INSERT INTO dropped_tasks (
+                    todoist_task_id, content, project_name, task_json, dropped_at
+                ) VALUES (?, ?, ?, ?, ?)
+                """,
+                (
+                    todoist_task_id,
+                    content,
+                    project_name,
+                    task_json,
+                    normalize_timestamp(datetime.now(UTC)),
+                ),
+            )
+            return cur.lastrowid or 0
+
+    def discard_dropped_task(self, row_id: int) -> None:
+        with self._connect() as conn:
+            conn.execute("DELETE FROM dropped_tasks WHERE id = ?", (row_id,))
 
     def record_completion(
         self,

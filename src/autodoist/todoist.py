@@ -269,6 +269,10 @@ class TodoistClient:
         existing_task: TodoistTask,
         *,
         new_due_date: str | None = None,
+        due_string: str | None = None,
+        clear_due: bool = False,
+        content: str | None = None,
+        description: str | None = None,
         labels: list[str] | None = None,
         priority: int | None = None,
         project_id: str | None = None,
@@ -276,7 +280,17 @@ class TodoistClient:
         commands: list[dict[str, Any]] = []
         update_args: dict[str, Any] = {"id": task_id}
 
-        if new_due_date is not None:
+        if content is not None:
+            update_args["content"] = content
+        if description is not None:
+            update_args["description"] = description
+
+        if clear_due:
+            update_args["due"] = None
+        elif due_string is not None:
+            # Todoist parses the string, so this also sets or replaces a recurrence.
+            update_args["due"] = {"string": due_string}
+        elif new_due_date is not None:
             due = existing_task.due
             due_payload: dict[str, Any] = dict(shift_due_date(due, new_due_date))
             if due is not None and due.is_recurring and due.string:
@@ -317,6 +331,10 @@ class TodoistClient:
 
     async def close_task(self, task_id: str) -> None:
         resp = await self._client.post(f"/tasks/{task_id}/close")
+        resp.raise_for_status()
+
+    async def delete_task(self, task_id: str) -> None:
+        resp = await self._client.delete(f"/tasks/{task_id}")
         resp.raise_for_status()
 
     async def sync_incremental(self, sync_token: str) -> tuple[str, list[TodoistTask]]:
