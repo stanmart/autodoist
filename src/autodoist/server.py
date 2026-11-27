@@ -30,7 +30,7 @@ from autodoist.models import (
     CaptureItem,
     CaptureResult,
     CompleteTaskResult,
-    CompletionHistoryItem,
+    CompletionHistory,
     DropTaskResult,
     TaskList,
     UpdateTaskResult,
@@ -161,6 +161,8 @@ def create_server(
                 if owns_todoist:
                     await todoist_client.aclose()
 
+    # Tools opt out of advertising an output schema: it costs context in clients that
+    # forward it, and the JSON results describe themselves.
     mcp = FastMCP(
         name="autodoist",
         instructions=build_instructions(app_config.rules),
@@ -177,7 +179,7 @@ def create_server(
             return JSONResponse({"status": "unhealthy"}, status_code=503)
         return JSONResponse({"status": "ok"})
 
-    @mcp.tool()
+    @mcp.tool(output_schema=None)
     async def get_tasks(
         project: str | None = None,
         label: str | None = None,
@@ -215,7 +217,7 @@ def create_server(
             limit=limit,
         )
 
-    @mcp.tool()
+    @mcp.tool(output_schema=None)
     async def capture_items(items: list[CaptureItem]) -> CaptureResult:
         """Batch-create tasks, which always get the review label.
 
@@ -224,7 +226,7 @@ def create_server(
         _require_authorized_user(app_config, env)
         return await service.capture_items(items)
 
-    @mcp.tool()
+    @mcp.tool(output_schema=None)
     async def update_or_reschedule(
         task_id: str,
         content: str | None = None,
@@ -264,7 +266,7 @@ def create_server(
             clear_review_flag=clear_review_flag,
         )
 
-    @mcp.tool()
+    @mcp.tool(output_schema=None)
     async def complete_task(task_id: str) -> CompleteTaskResult:
         """Mark a task done in Todoist and log it to the completion history.
 
@@ -273,7 +275,7 @@ def create_server(
         _require_authorized_user(app_config, env)
         return await service.complete_task(task_id)
 
-    @mcp.tool()
+    @mcp.tool(output_schema=None)
     async def drop_task(task_id: str) -> DropTaskResult:
         """Delete a task that will not be done.
 
@@ -282,14 +284,17 @@ def create_server(
         _require_authorized_user(app_config, env)
         return await service.drop_task(task_id)
 
-    @mcp.tool()
+    @mcp.tool(output_schema=None)
     async def get_completion_history(
         days: int = 90,
         project: str | None = None,
-    ) -> list[CompletionHistoryItem]:
+    ) -> CompletionHistory:
         """Retrieve compact completion history records for recurrence auditing."""
         _require_authorized_user(app_config, env)
-        return await service.get_completion_history(days=days, project=project)
+        # An object, not a bare list: an empty list would reach the client as no content.
+        return CompletionHistory(
+            completions=await service.get_completion_history(days=days, project=project)
+        )
 
     return mcp
 

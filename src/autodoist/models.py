@@ -218,3 +218,7 @@ class CompletionHistoryItem(BaseModel):
     content: str
     project_name: str
     completed_at: str
+
+
+class CompletionHistory(BaseModel):
+    completions: list[CompletionHistoryItem]

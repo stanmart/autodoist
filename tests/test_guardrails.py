@@ -101,6 +101,8 @@ async def test_only_the_safe_tools_are_registered(tmp_path: Path) -> None:
         "drop_task",
         "get_completion_history",
     }
+    # Output schemas are switched off to keep the advertised tool definitions small.
+    assert all(tool.output_schema is None for tool in tools)
 
 
 @respx.mock
@@ -217,7 +219,7 @@ async def test_capture_items_guardrails_review_tag_duplicates_and_post_hoc(
 
             history = (
                 await _call_json(client, "get_completion_history", {"days": 30})
-            )["result"]
+            )["completions"]
             assert len(history) == 1
             assert history[0]["content"] == "Bought oat milk"
     finally:
@@ -457,7 +459,7 @@ async def test_complete_task_and_history_project_isolation(tmp_path: Path) -> No
             assert res["completed"] is True
             history = (
                 await _call_json(client, "get_completion_history", {"days": 7})
-            )["result"]
+            )["completions"]
             assert [h["content"] for h in history] == ["Renew passport"]
     finally:
         await todoist.aclose()
@@ -1155,7 +1157,7 @@ async def test_drop_task_deletes_snapshots_and_stays_out_of_history(tmp_path: Pa
                 "project": "Personal",
                 "dropped": True,
             }
-            history = (await _call_json(client, "get_completion_history", {}))["result"]
+            history = (await _call_json(client, "get_completion_history", {}))["completions"]
             assert history == []
     finally:
         await todoist.aclose()
