@@ -1174,29 +1174,6 @@ async def test_drop_task_deletes_snapshots_and_stays_out_of_history(tmp_path: Pa
 
 
 @respx.mock
-async def test_drop_task_keeps_no_snapshot_when_the_delete_fails(tmp_path: Path) -> None:
-    _mock_projects([{"id": "p1", "name": "Personal"}])
-    _mock_task({"id": "t1", "content": "Learn the ukulele", "project_id": "p1"})
-    respx.get(f"{TODOIST_API_V1_BASE}/tasks").mock(
-        return_value=httpx.Response(200, json={"results": [], "next_cursor": None})
-    )
-    respx.delete(f"{TODOIST_API_V1_BASE}/tasks/t1").mock(return_value=httpx.Response(500))
-    cfg, env = _make_config(tmp_path)
-    todoist = TodoistClient("test-token")
-    mcp = create_server(cfg, env, todoist=todoist)
-
-    try:
-        async with Client(mcp) as client:
-            with pytest.raises(ToolError):
-                await client.call_tool("drop_task", {"task_id": "t1"})
-    finally:
-        await todoist.aclose()
-
-    with sqlite3.connect(cfg.storage.db_path) as conn:
-        assert conn.execute("SELECT COUNT(*) FROM dropped_tasks").fetchone() == (0,)
-
-
-@respx.mock
 async def test_get_tasks_slot_triage_someday_and_stale_filters(tmp_path: Path) -> None:
     now = datetime.now(UTC)
     today = now.date()

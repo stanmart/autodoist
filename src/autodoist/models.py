@@ -64,11 +64,6 @@ class TodoistTask(BaseModel):
     def coerce_ids(cls, value: object) -> str:
         return "" if value is None else str(value)
 
-    @field_validator("parent_id", mode="before")
-    @classmethod
-    def coerce_parent_id(cls, value: object) -> str | None:
-        return None if value is None else str(value)
-
     @field_validator("content", "description", mode="before")
     @classmethod
     def coerce_content(cls, value: object) -> str:

@@ -86,11 +86,6 @@ class RoutineConfig(BaseModel):
     purpose: str = ""
     capacity: str = ""
 
-    @field_validator("name", mode="before")
-    @classmethod
-    def strip_name(cls, value: object) -> object:
-        return value.strip() if isinstance(value, str) else value
-
 
 class RulesConfig(BaseModel):
     """Project and label guardrails loaded from config.toml."""

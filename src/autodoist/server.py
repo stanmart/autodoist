@@ -196,10 +196,11 @@ def create_server(
             Field(description="Only inbox tasks and tasks still carrying the review label."),
         ] = False,
         older_than_days: Annotated[
-            int | None, Field(description="Only tasks created at least this many days ago.")
+            int | None,
+            Field(ge=0, description="Only tasks created at least this many days ago."),
         ] = None,
         group_by: GroupBy = "label",
-        limit: int = 50,
+        limit: Annotated[int, Field(ge=1)] = 50,
     ) -> TaskList:
         """List active tasks, filtered and grouped, sorted by priority then due date.
 

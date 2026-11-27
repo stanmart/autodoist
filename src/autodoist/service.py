@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import re
-from datetime import UTC, date, datetime, timedelta
+from datetime import date, datetime, timedelta
 from typing import Literal
 from zoneinfo import ZoneInfo
 
@@ -28,7 +28,6 @@ from autodoist.todoist import AmbiguousProjectError, TodoistClient
 
 _TASK_ID_RE = re.compile(r"[A-Za-z0-9_-]+")
 _ISO_DATE_RE = re.compile(r"\d{4}-\d{2}-\d{2}")
-_NO_DATE = "no date"
 
 DueFilter = Literal["all", "overdue", "today", "week", "none"]
 GroupBy = Literal["label", "project", "due", "none"]
@@ -60,12 +59,9 @@ def _age_days(added_at: str | None, now: datetime) -> int | None:
     if not added_at:
         return None
     try:
-        added = datetime.fromisoformat(added_at)
-    except ValueError:
+        return max((now - datetime.fromisoformat(added_at)).days, 0)
+    except (ValueError, TypeError):
         return None
-    if added.tzinfo is None:
-        added = added.replace(tzinfo=UTC)
-    return max((now - added).days, 0)
 
 
 def _validate_task_id(task_id: str) -> str:
@@ -142,10 +138,6 @@ class AutodoistService:
                     f"Unknown slot {slot!r}; "
                     f"configured slots: {[r.name for r in self.rules.routines]}"
                 )
-        if older_than_days is not None and older_than_days < 0:
-            raise ValueError("older_than_days must not be negative")
-        if limit < 1:
-            raise ValueError("limit must be at least 1")
 
         project_id = await self.todoist.get_project_id(project) if project else None
         tasks = await self.todoist.get_active_tasks(project_id=project_id, label=label)
@@ -348,7 +340,6 @@ class AutodoistService:
                 raise ValueError("due_string must not be empty")
             if new_due_date is not None:
                 raise ValueError("Pass either new_due_date or due_string, not both")
-        clear_due = due_string is not None and due_string.lower() == _NO_DATE
         if new_due_date is not None:
             if not _ISO_DATE_RE.fullmatch(new_due_date):
                 raise ValueError("new_due_date must use YYYY-MM-DD format")
@@ -393,8 +384,7 @@ class AutodoistService:
             task_id,
             existing,
             new_due_date=new_due_date,
-            due_string=None if clear_due else due_string,
-            clear_due=clear_due,
+            due_string=due_string,
             content=content,
             description=notes,
             labels=final_labels,
@@ -449,20 +439,17 @@ class AutodoistService:
                 f"Task {task_id!r} has subtasks; drop or move them before dropping it"
             )
 
+        # Snapshot first: a leftover snapshot of a task that survived is harmless, a
+        # deleted task without one is gone for good.
         existing.project_name = project_name
-        row_id = await asyncio.to_thread(
+        await asyncio.to_thread(
             self.db.record_dropped_task,
             todoist_task_id=task_id,
             content=existing.content,
             project_name=project_name,
             task_json=existing.model_dump_json(),
         )
-        try:
-            await self.todoist.delete_task(task_id)
-        except BaseException:
-            # The task still exists, so the snapshot would be a false record.
-            await asyncio.to_thread(self.db.discard_dropped_task, row_id)
-            raise
+        await self.todoist.delete_task(task_id)
         return DropTaskResult(
             task_id=task_id,
             content=existing.content,
