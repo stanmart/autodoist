@@ -6,8 +6,8 @@ Build a lightweight personal backend that sits between **Gemini** (or another OA
 
 ### Goals
 
-- **Low context overhead:** Expose 5 workflow-oriented MCP tools instead of Todoist's full ~47-tool surface.
-- **Code-enforced guardrails:** Prevent destructive actions (deleting tasks/projects, creating new projects) and restrict accessible projects/labels in server code rather than relying on prompt compliance.
+- **Low context overhead:** Expose 6 workflow-oriented MCP tools instead of Todoist's full ~47-tool surface.
+- **Code-enforced guardrails:** Prevent destructive actions (deleting or creating projects; tasks can only be deleted one at a time via `drop_task`, which snapshots them first) and restrict accessible projects/labels in server code rather than relying on prompt compliance.
 - **Unlimited completion history:** Incrementally sync completions into a local SQLite database for long-term (up to 365-day) recurrence audits.
 - **Native post-hoc logging:** Allow logging completed real-world actions (*"just bought diapers"*) directly into history without cluttering active Todoist lists.
 - **Standard OIDC / OAuth 2.1 + static Todoist token:** Use a static personal API token for Todoist and any standard OIDC provider (passkeys, CIMD, etc.) for the MCP client.
@@ -94,6 +94,15 @@ CREATE TABLE completion_log (
 );
 
 CREATE INDEX idx_completion_log_completed_at ON completion_log(completed_at);
+
+CREATE TABLE dropped_tasks (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    todoist_task_id TEXT NOT NULL,
+    content TEXT NOT NULL,
+    project_name TEXT NOT NULL,
+    task_json TEXT NOT NULL,
+    dropped_at TIMESTAMP NOT NULL
+);
 ```
 
 - When `todoist_sync` receives a completion for a task already logged via `mcp_complete` within `±60s`, it reconciles that row in-place to Todoist's authoritative server timestamp and `source='todoist_sync'`.
@@ -101,14 +110,15 @@ CREATE INDEX idx_completion_log_completed_at ON completion_log(completed_at);
 
 ---
 
-## 5. MCP Tool Surface (5 Tools)
+## 5. MCP Tool Surface (6 Tools)
 
 | Tool Name | Purpose | Inputs | Guardrails & Backend Behavior |
 | --- | --- | --- | --- |
 | `get_tasks_by_synergy` | Structured retrieval for daily triage or batching. | `project?`, `label?`, `include_overdue` | Queries active tasks, filters to `allowed_projects`, evaluates overdue dates in `rules.timezone`, groups by `synergy_labels` / `untagged`, and sorts by priority/due date. |
 | `capture_items` | Batch intake for tasks and post-hoc logs. | `items`: list of `{ content, mode, project, labels, due_string?, priority?, notes? }` | Validates `capture_projects` & `allowed_labels`. **Tasks:** skips normalized duplicates against active project tasks, auto-attaches `review_label`, submits batched `/sync item_add`. **Post-hoc:** skips duplicates within-batch and against recent (`300s`) `post_hoc_log` entries, then writes to `completion_log`. |
-| `update_or_reschedule` | Safe edits and recurrence-preserving date moves. | `task_id`, `new_due_date?`, `labels?`, `priority?`, `project?`, `clear_review_flag` | Validates `task_id`, `YYYY-MM-DD`, `allowed_projects`, and `allowed_labels`; `labels` replaces only allowlisted labels and keeps hand-set ones; preserves `review_label` unless `clear_review_flag=true`; preserves the recurrence string and the time of day (floating or fixed-timezone) when moving a date. |
+| `update_or_reschedule` | Rewrites, safe edits, and schedule changes. | `task_id`, `content?`, `notes?`, `new_due_date?`, `due_string?`, `labels?`, `priority?`, `project?`, `clear_review_flag` | Validates `task_id`, `YYYY-MM-DD`, `allowed_projects`, and `allowed_labels`; `due_string` (exclusive with `new_due_date`) replaces the whole schedule including recurrence, and `no date` clears it; `labels` replaces only allowlisted labels and keeps hand-set ones; preserves `review_label` unless `clear_review_flag=true`; preserves the recurrence string and the time of day (floating or fixed-timezone) when moving a date. |
 | `complete_task` | Marks a task done and immediately records it. | `task_id` | Verifies task is in `allowed_projects`, closes via Todoist API, and records `mcp_complete` row (later reconciled on sync). An already completed task is returned without closing or logging again. |
+| `drop_task` | Removes a task that will not be done. | `task_id` | Verifies task is in `allowed_projects`, refuses tasks with subtasks, snapshots the task into `dropped_tasks`, then deletes it in Todoist (the snapshot is discarded if the delete fails). Never touches `completion_log`. |
 | `get_completion_history` | Feeds weekly recurrence audit. | `days` (`1..365`, default `90`), `project?` | Queries `completion_log` scoped to `allowed_projects` and returns compact `(content, project_name, completed_at)` records. |
 
 **Project names are not unique in Todoist.** The allowlist is name-based, so the project cache tracks names shared by several active projects as ambiguous: they never resolve to an ID, tool calls touching them raise an error asking for a rename, and background sync skips them with a warning.
