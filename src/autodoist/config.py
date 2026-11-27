@@ -96,7 +96,7 @@ class RulesConfig(BaseModel):
     capture_projects: list[str] = Field(min_length=1)
     allowed_labels: list[str] = Field(min_length=1)
     synergy_labels: list[str] = Field(default_factory=list)
-    review_label: str = Field(min_length=1)
+    review_label: str | None = None
     someday_label: str | None = None
     label_descriptions: dict[str, str] = Field(default_factory=dict)
     inbox_project: str = "Inbox"
@@ -159,7 +159,7 @@ class RulesConfig(BaseModel):
                 f"synergy_labels must be a subset of allowed_labels; invalid: {invalid}"
             )
 
-        if self.review_label not in allowed_label_set:
+        if self.review_label is not None and self.review_label not in allowed_label_set:
             raise ValueError(
                 f"review_label {self.review_label!r} must be present in allowed_labels"
             )

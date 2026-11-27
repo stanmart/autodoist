@@ -145,6 +145,7 @@ class AutodoistService:
         now = datetime.now(ZoneInfo(self.rules.timezone))
         today = now.date()
         someday = self.rules.someday_label
+        review = self.rules.review_label
         slot_due_limit = (
             (today + timedelta(days=routine.due_within_days)).isoformat()
             if routine is not None and routine.due_within_days is not None
@@ -173,7 +174,7 @@ class AutodoistService:
                 continue
             if needs_triage and not (
                 task.project_name == self.rules.inbox_project
-                or self.rules.review_label in task.labels
+                or (review is not None and review in task.labels)
             ):
                 continue
             age_days = _age_days(task.added_at, now)
@@ -264,7 +265,10 @@ class AutodoistService:
                     )
                     continue
                 proj_seen.add(norm)
-                labels_with_review = list(dict.fromkeys([*clean_labels, self.rules.review_label]))
+                review = self.rules.review_label
+                labels_with_review = list(
+                    dict.fromkeys([*clean_labels, *([review] if review else [])])
+                )
                 batch_inputs.append(
                     CaptureTaskInput(
                         content=item.content,
@@ -369,13 +373,11 @@ class AutodoistService:
                 base_labels = list(dict.fromkeys([*clean_labels, *unmanaged]))
             else:
                 base_labels = list(existing.labels)
+            review = self.rules.review_label
             if clear_review_flag:
-                base_labels = [lbl for lbl in base_labels if lbl != self.rules.review_label]
-            elif (
-                self.rules.review_label in existing.labels
-                and self.rules.review_label not in base_labels
-            ):
-                base_labels.append(self.rules.review_label)
+                base_labels = [lbl for lbl in base_labels if lbl != review]
+            elif review in existing.labels and review not in base_labels:
+                base_labels.append(review)
             final_labels = base_labels
 
         api_priority = app_to_api_priority(priority) if priority is not None else None

@@ -25,7 +25,7 @@ def test_app_config_loads_default_toml() -> None:
     assert cfg.sync.interval_minutes == 30
     assert cfg.rules.allowed_projects == ["Inbox", "Personal", "Household"]
     assert cfg.rules.capture_projects == ["Personal", "Household"]
-    assert cfg.rules.review_label == "review"
+    assert cfg.rules.review_label is None
     assert cfg.rules.timezone == "UTC"
 
 
