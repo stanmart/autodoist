@@ -51,6 +51,7 @@ autodoist/
 │   ├── db.py                      # SQLite schema, completion reconciliation, & post-hoc lookup
 │   ├── todoist.py                 # Typed Todoist API v1 client & TTL ProjectCache
 │   ├── sync_worker.py             # In-process periodic sync_loop + CLI entrypoint
+│   ├── instructions.py            # MCP server instructions rendered from [rules]
 │   ├── service.py                 # AutodoistService domain layer (guardrails & async DB offload)
 │   └── server.py                  # Thin FastMCP server, OIDC authz middleware, & /health
 └── tests/
@@ -120,6 +121,8 @@ CREATE TABLE dropped_tasks (
 | `complete_task` | Marks a task done and immediately records it. | `task_id` | Verifies task is in `allowed_projects`, closes via Todoist API, and records `mcp_complete` row (later reconciled on sync). An already completed task is returned without closing or logging again. |
 | `drop_task` | Removes a task that will not be done. | `task_id` | Verifies task is in `allowed_projects`, refuses tasks with subtasks, snapshots the task into `dropped_tasks`, then deletes it in Todoist (the snapshot is discarded if the delete fails). Never touches `completion_log`. |
 | `get_completion_history` | Feeds weekly recurrence audit. | `days` (`1..365`, default `90`), `project?` | Queries `completion_log` scoped to `allowed_projects` and returns compact `(content, project_name, completed_at)` records. |
+
+**Server instructions.** `instructions.py` renders the MCP `instructions` from `[rules]`, so the vocabulary the agent needs (projects, label meanings, slots and their capacity) has one source of truth and travels with the server instead of living in a per-provider skill. It deliberately stops at vocabulary: tool-level invariants (complete versus drop, `post_hoc`) sit in the tool descriptions, and procedures such as triage or a weekly review are left to client-side skills, which load on demand and are specific to one household's workflow. `python -m autodoist.instructions` prints the text for clients that ignore MCP instructions.
 
 **Routines.** A routine (`[[rules.routines]]`) is a recurring slot for working through tasks, such as a weekday evening or a weekend block. Its `name` doubles as the label that assigns a task to it, so each task has a *when* (slot label) alongside its *where/how* (synergy label). `get_tasks(slot=...)` returns the slot's labelled tasks plus, when `due_within_days` is set, any task due inside that window. Slot times are deliberately not configured here: they live in the calendar, which the assistant reads separately.
 

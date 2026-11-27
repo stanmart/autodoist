@@ -33,12 +33,23 @@ inbox_project = "Inbox"
 # IANA timezone used for overdue date comparisons (e.g. Europe/Budapest)
 timezone = "UTC"
 
+# What each label means; sent to the MCP client in the server instructions
+[rules.label_descriptions]
+errands = "Needs leaving the house"
+home = "Done at home"
+admin = "Paperwork, calls, and online chores"
+15min = "Takes 15 minutes or less"
+
 # Routine slots: recurring times for working through tasks. The name is also the label
 # that assigns a task to the slot; the times themselves live in your calendar.
 [[rules.routines]]
 name = "evening"
+purpose = "Short, urgent tasks on weekday evenings"
+capacity = "30 minutes, at most 3 tasks"
 # Also pull in any task due within this many days, whatever its label
 due_within_days = 1
 
 [[rules.routines]]
 name = "weekend"
+purpose = "Weekly batch of everything collected, plus the weekly review"
+capacity = "2 hours"

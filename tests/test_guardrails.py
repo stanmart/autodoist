@@ -1306,3 +1306,33 @@ def test_routines_and_someday_label_must_use_allowed_labels() -> None:
         )
     with pytest.raises(ValueError, match="someday_label"):
         RulesConfig.model_validate({**base, "someday_label": "someday"})
+
+
+def test_server_instructions_describe_the_configured_vocabulary(tmp_path: Path) -> None:
+    cfg, env = _make_config(tmp_path)
+    cfg.rules = RulesConfig.model_validate(
+        {
+            **cfg.rules.model_dump(),
+            "allowed_labels": [*cfg.rules.allowed_labels, "evening", "someday"],
+            "someday_label": "someday",
+            "label_descriptions": {"errands": "Needs leaving the house"},
+            "routines": [
+                {"name": "evening", "purpose": "Urgent tasks.", "capacity": "3 tasks"}
+            ],
+        }
+    )
+    instructions = create_server(cfg, env).instructions
+    assert instructions is not None
+    assert "Projects: Inbox, Personal, Household." in instructions
+    assert "New tasks may be created in: Personal, Household." in instructions
+    assert "- errands: Needs leaving the house" in instructions
+    assert "- evening: Urgent tasks. Capacity: 3 tasks" in instructions
+    # Slot labels are listed once, under the slots.
+    assert instructions.count("- evening") == 1
+    # Vocabulary only: procedures live in client-side skills.
+    assert "Triage" not in instructions
+
+    with pytest.raises(ValueError, match="label_descriptions keys"):
+        RulesConfig.model_validate(
+            {**cfg.rules.model_dump(), "label_descriptions": {"bogus": "x"}}
+        )

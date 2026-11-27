@@ -25,6 +25,7 @@ from autodoist.config import (
     validate_todoist_token,
 )
 from autodoist.db import Database
+from autodoist.instructions import build_instructions
 from autodoist.models import (
     CaptureItem,
     CaptureResult,
@@ -162,6 +163,7 @@ def create_server(
 
     mcp = FastMCP(
         name="autodoist",
+        instructions=build_instructions(app_config.rules),
         auth=build_auth_provider(app_config, env, token_verifier=token_verifier),
         lifespan=_lifespan,
     )
@@ -215,7 +217,10 @@ def create_server(
 
     @mcp.tool()
     async def capture_items(items: list[CaptureItem]) -> CaptureResult:
-        """Batch capture tasks (with mandatory review label) or log post-hoc completions."""
+        """Batch-create tasks, which always get the review label.
+
+        Use mode='post_hoc' to log something already done that had no task.
+        """
         _require_authorized_user(app_config, env)
         return await service.capture_items(items)
 
@@ -261,13 +266,19 @@ def create_server(
 
     @mcp.tool()
     async def complete_task(task_id: str) -> CompleteTaskResult:
-        """Mark a task completed in Todoist and log it; a no-op if it is already completed."""
+        """Mark a task done in Todoist and log it to the completion history.
+
+        Only for work that actually happened; use drop_task for tasks that will not be done.
+        """
         _require_authorized_user(app_config, env)
         return await service.complete_task(task_id)
 
     @mcp.tool()
     async def drop_task(task_id: str) -> DropTaskResult:
-        """Delete a task that will not be done; it is not logged as a completion."""
+        """Delete a task that will not be done.
+
+        Unlike complete_task, this keeps it out of the completion history.
+        """
         _require_authorized_user(app_config, env)
         return await service.drop_task(task_id)
 
