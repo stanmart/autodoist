@@ -4,7 +4,10 @@ from autodoist.config import RulesConfig
 
 
 def build_instructions(rules: RulesConfig) -> str:
-    """Render the MCP server instructions: the configured vocabulary plus house rules."""
+    """Render the MCP server instructions: the configured vocabulary, and nothing else.
+
+    Procedures (triage, reviews, briefs) belong in client-side skills, not here.
+    """
     slots = [routine.name for routine in rules.routines]
     lines = [
         "autodoist manages a household's Todoist tasks. Use it for any task, chore, "
@@ -33,27 +36,11 @@ def build_instructions(rules: RulesConfig) -> str:
             detail = ". ".join(part.rstrip(".") for part in parts if part)
             lines.append(f"- {routine.name}: {detail}" if detail else f"- {routine.name}")
         lines.append(
-            "Slot times are calendar events named after the slot. "
-            "Use get_tasks(slot=...) for what to do in one."
+            "Slot times are calendar events named after the slot; "
+            "get_tasks(slot=...) lists what belongs in one."
         )
 
-    slot_rule = "exactly one slot label"
-    if rules.someday_label:
-        slot_rule += f" or {rules.someday_label}"
-    lines += [
-        "",
-        "Rules:",
-        "- Priority runs from 1 (highest) to 4 (default).",
-        "- A due date is a real deadline or a recurrence, never just a plan to do it that day.",
-        "- Triage: get_tasks(needs_triage=true), then for each task rewrite the content as a "
-        f"clear action, set labels and {slot_rule if rules.routines else 'a due date if any'}, "
-        f"and move it out of {rules.inbox_project}. Respect slot capacity: push overflow to "
-        "a later slot and say so. Pass clear_review_flag=true only once the user has agreed.",
-        "- Something already done: complete_task if a matching active task exists, otherwise "
-        "capture_items with mode='post_hoc'.",
-        "- Something that will not be done: drop_task. Never complete it, because "
-        "completions feed the history used to spot recurring needs.",
-    ]
+    lines += ["", "Priority runs from 1 (highest) to 4 (default)."]
     return "\n".join(lines)
 
 

@@ -13,7 +13,7 @@ A lean MCP server and mini-backend sitting between an MCP client (e.g. **Gemini*
 
 ## Server instructions
 
-The server sends MCP `instructions` generated from `[rules]`: the allowed projects, each label's meaning, the routine slots, and a handful of house rules (triage, done versus dropped, what a due date means). Clients that honour them need no separate skill or prompt. For a client that ignores them, print the same text and paste it into a Gem, skill, or system prompt:
+The server sends MCP `instructions` generated from `[rules]`: the allowed projects, each label's meaning, and the routine slots. They cover vocabulary only. Procedures such as triage or a weekly review are specific to your workflow and belong in client-side skills or prompts, which can refer to the labels and slots the server lists instead of repeating them. For a client that ignores MCP instructions, print the same text and paste it into a Gem, skill, or system prompt:
 
 ```bash
 uv run python -m autodoist.instructions

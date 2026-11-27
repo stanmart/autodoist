@@ -1327,9 +1327,10 @@ def test_server_instructions_describe_the_configured_vocabulary(tmp_path: Path) 
     assert "New tasks may be created in: Personal, Household." in instructions
     assert "- errands: Needs leaving the house" in instructions
     assert "- evening: Urgent tasks. Capacity: 3 tasks" in instructions
-    # Slot labels are listed once, under the slots, and the triage rule names the options.
+    # Slot labels are listed once, under the slots.
     assert instructions.count("- evening") == 1
-    assert "exactly one slot label or someday" in instructions
+    # Vocabulary only: procedures live in client-side skills.
+    assert "Triage" not in instructions
 
     with pytest.raises(ValueError, match="label_descriptions keys"):
         RulesConfig.model_validate(
