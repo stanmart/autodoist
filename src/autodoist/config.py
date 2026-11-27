@@ -76,6 +76,20 @@ class AuthConfig(BaseModel):
         raise ValueError("allowed_user_subs must be a list of user sub strings")
 
 
+class RoutineConfig(BaseModel):
+    """A recurring time slot for working through tasks; its name is also its label."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    name: str = Field(min_length=1)
+    due_within_days: int | None = Field(default=None, ge=0)
+
+    @field_validator("name", mode="before")
+    @classmethod
+    def strip_name(cls, value: object) -> object:
+        return value.strip() if isinstance(value, str) else value
+
+
 class RulesConfig(BaseModel):
     """Project and label guardrails loaded from config.toml."""
 
@@ -86,6 +100,9 @@ class RulesConfig(BaseModel):
     allowed_labels: list[str] = Field(min_length=1)
     synergy_labels: list[str] = Field(default_factory=list)
     review_label: str = Field(min_length=1)
+    someday_label: str | None = None
+    inbox_project: str = "Inbox"
+    routines: list[RoutineConfig] = Field(default_factory=list)
     timezone: str = "UTC"
 
     @field_validator("timezone", mode="before")
@@ -147,6 +164,21 @@ class RulesConfig(BaseModel):
         if self.review_label not in allowed_label_set:
             raise ValueError(
                 f"review_label {self.review_label!r} must be present in allowed_labels"
+            )
+
+        if self.someday_label is not None and self.someday_label not in allowed_label_set:
+            raise ValueError(
+                f"someday_label {self.someday_label!r} must be present in allowed_labels"
+            )
+
+        routine_names = [routine.name for routine in self.routines]
+        if len(set(routine_names)) != len(routine_names):
+            raise ValueError("routine names must be unique")
+        invalid_routines = sorted(set(routine_names) - allowed_label_set)
+        if invalid_routines:
+            raise ValueError(
+                "each routine name is also its label and must be present in "
+                f"allowed_labels; invalid: {invalid_routines}"
             )
         return self
 

@@ -31,10 +31,10 @@ from autodoist.models import (
     CompleteTaskResult,
     CompletionHistoryItem,
     DropTaskResult,
-    TaskOut,
+    TaskList,
     UpdateTaskResult,
 )
-from autodoist.service import AutodoistService
+from autodoist.service import AutodoistService, DueFilter, GroupBy
 from autodoist.sync_worker import sync_loop
 from autodoist.todoist import TodoistClient
 
@@ -176,17 +176,41 @@ def create_server(
         return JSONResponse({"status": "ok"})
 
     @mcp.tool()
-    async def get_tasks_by_synergy(
+    async def get_tasks(
         project: str | None = None,
         label: str | None = None,
-        include_overdue: bool = True,
-    ) -> dict[str, list[TaskOut]]:
-        """List active tasks grouped by synergy label and sorted by priority and due date."""
+        due: Annotated[
+            DueFilter,
+            Field(description="'today' and 'week' include overdue; 'none' means no due date."),
+        ] = "all",
+        slot: Annotated[
+            str | None,
+            Field(description="Routine slot: its label, plus tasks due before the slot ends."),
+        ] = None,
+        needs_triage: Annotated[
+            bool,
+            Field(description="Only inbox tasks and tasks still carrying the review label."),
+        ] = False,
+        older_than_days: Annotated[
+            int | None, Field(description="Only tasks created at least this many days ago.")
+        ] = None,
+        group_by: GroupBy = "label",
+        limit: int = 50,
+    ) -> TaskList:
+        """List active tasks, filtered and grouped, sorted by priority then due date.
+
+        Filters combine with AND. Someday tasks are hidden unless requested by `label`.
+        """
         _require_authorized_user(app_config, env)
-        return await service.get_tasks_by_synergy(
+        return await service.get_tasks(
             project=project,
             label=label,
-            include_overdue=include_overdue,
+            due=due,
+            slot=slot,
+            needs_triage=needs_triage,
+            older_than_days=older_than_days,
+            group_by=group_by,
+            limit=limit,
         )
 
     @mcp.tool()

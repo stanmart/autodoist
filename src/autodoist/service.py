@@ -2,7 +2,8 @@ from __future__ import annotations
 
 import asyncio
 import re
-from datetime import date, datetime
+from datetime import UTC, date, datetime, timedelta
+from typing import Literal
 from zoneinfo import ZoneInfo
 
 from autodoist.config import RulesConfig
@@ -16,6 +17,7 @@ from autodoist.models import (
     DropTaskResult,
     PostHocLoggedOut,
     SkippedDuplicateOut,
+    TaskList,
     TaskOut,
     UpdateTaskResult,
     api_to_app_priority,
@@ -27,6 +29,43 @@ from autodoist.todoist import AmbiguousProjectError, TodoistClient
 _TASK_ID_RE = re.compile(r"[A-Za-z0-9_-]+")
 _ISO_DATE_RE = re.compile(r"\d{4}-\d{2}-\d{2}")
 _NO_DATE = "no date"
+
+DueFilter = Literal["all", "overdue", "today", "week", "none"]
+GroupBy = Literal["label", "project", "due", "none"]
+
+# "today" and "week" include overdue tasks: they are still waiting to be done.
+_DUE_FILTER_BUCKETS: dict[str, frozenset[str]] = {
+    "all": frozenset({"overdue", "today", "this_week", "later", "no_date"}),
+    "overdue": frozenset({"overdue"}),
+    "today": frozenset({"overdue", "today"}),
+    "week": frozenset({"overdue", "today", "this_week"}),
+    "none": frozenset({"no_date"}),
+}
+
+
+def _due_bucket(due_day: str | None, today: date) -> str:
+    if due_day is None:
+        return "no_date"
+    today_str = today.isoformat()
+    if due_day < today_str:
+        return "overdue"
+    if due_day == today_str:
+        return "today"
+    if due_day <= (today + timedelta(days=7)).isoformat():
+        return "this_week"
+    return "later"
+
+
+def _age_days(added_at: str | None, now: datetime) -> int | None:
+    if not added_at:
+        return None
+    try:
+        added = datetime.fromisoformat(added_at)
+    except ValueError:
+        return None
+    if added.tzinfo is None:
+        added = added.replace(tzinfo=UTC)
+    return max((now - added).days, 0)
 
 
 def _validate_task_id(task_id: str) -> str:
@@ -76,13 +115,18 @@ class AutodoistService:
         self._require_unambiguous(project_name)
         return project_name
 
-    async def get_tasks_by_synergy(
+    async def get_tasks(
         self,
         *,
         project: str | None = None,
         label: str | None = None,
-        include_overdue: bool = True,
-    ) -> dict[str, list[TaskOut]]:
+        due: DueFilter = "all",
+        slot: str | None = None,
+        needs_triage: bool = False,
+        older_than_days: int | None = None,
+        group_by: GroupBy = "label",
+        limit: int = 50,
+    ) -> TaskList:
         if project is not None and project not in self._allowed_projects:
             raise ValueError(
                 f"Project {project!r} is not allowed; "
@@ -90,43 +134,98 @@ class AutodoistService:
             )
         if label is not None:
             _validate_labels([label], self.rules.allowed_labels)
+        routine = None
+        if slot is not None:
+            routine = next((r for r in self.rules.routines if r.name == slot), None)
+            if routine is None:
+                raise ValueError(
+                    f"Unknown slot {slot!r}; "
+                    f"configured slots: {[r.name for r in self.rules.routines]}"
+                )
+        if older_than_days is not None and older_than_days < 0:
+            raise ValueError("older_than_days must not be negative")
+        if limit < 1:
+            raise ValueError("limit must be at least 1")
 
         project_id = await self.todoist.get_project_id(project) if project else None
         tasks = await self.todoist.get_active_tasks(project_id=project_id, label=label)
 
-        today_str = datetime.now(ZoneInfo(self.rules.timezone)).strftime("%Y-%m-%d")
-        groups: dict[str, list[TaskOut]] = {lbl: [] for lbl in self.rules.synergy_labels}
-        groups["untagged"] = []
+        now = datetime.now(ZoneInfo(self.rules.timezone))
+        today = now.date()
+        someday = self.rules.someday_label
+        slot_due_limit = (
+            (today + timedelta(days=routine.due_within_days)).isoformat()
+            if routine is not None and routine.due_within_days is not None
+            else None
+        )
 
+        matched: list[tuple[TaskOut, str]] = []
         for task in tasks:
             if task.project_name is None or task.project_name not in self._allowed_projects:
                 continue
             self._require_unambiguous(task.project_name)
-            due_date = task.due.date if task.due is not None else None
-            if not include_overdue and due_date and due_date < today_str:
+
+            # Someday tasks stay out of the way unless they are asked for by label.
+            if someday is not None and someday in task.labels and label != someday:
                 continue
-            bucket = next(
-                (lbl for lbl in self.rules.synergy_labels if lbl in task.labels),
-                "untagged",
-            )
-            groups[bucket].append(
-                TaskOut(
-                    id=task.id,
-                    content=task.content,
-                    project=task.project_name,
-                    labels=task.labels,
-                    priority=api_to_app_priority(task.priority),
-                    due_date=due_date,
-                    is_recurring=task.due.is_recurring if task.due is not None else False,
+            due_raw = task.due.date if task.due is not None else None
+            due_day = due_raw[:10] if due_raw else None
+            bucket = _due_bucket(due_day, today)
+            if bucket not in _DUE_FILTER_BUCKETS[due]:
+                continue
+            if routine is not None and not (
+                routine.name in task.labels
+                or (slot_due_limit is not None and due_day is not None
+                    and due_day <= slot_due_limit)
+            ):
+                continue
+            if needs_triage and not (
+                task.project_name == self.rules.inbox_project
+                or self.rules.review_label in task.labels
+            ):
+                continue
+            age_days = _age_days(task.added_at, now)
+            if older_than_days is not None and (age_days is None or age_days < older_than_days):
+                continue
+
+            matched.append(
+                (
+                    TaskOut(
+                        id=task.id,
+                        content=task.content,
+                        project=task.project_name,
+                        labels=task.labels,
+                        priority=api_to_app_priority(task.priority),
+                        due_date=due_raw,
+                        is_recurring=task.due.is_recurring if task.due is not None else False,
+                        notes=task.description or None,
+                        age_days=age_days,
+                    ),
+                    bucket,
                 )
             )
 
-        for bucket_items in groups.values():
-            bucket_items.sort(
-                key=lambda t: (t.priority, t.due_date or "9999-99-99")
-            )
+        matched.sort(key=lambda pair: (pair[0].priority, pair[0].due_date or "9999-99-99"))
+        groups: dict[str, list[TaskOut]] = {}
+        for out, bucket in matched[:limit]:
+            if group_by == "label":
+                key = next(
+                    (lbl for lbl in self.rules.synergy_labels if lbl in out.labels),
+                    "untagged",
+                )
+            elif group_by == "project":
+                key = out.project
+            elif group_by == "due":
+                key = bucket
+            else:
+                key = "tasks"
+            groups.setdefault(key, []).append(out)
 
-        return {k: v for k, v in groups.items() if v}
+        return TaskList(
+            groups=groups,
+            total=len(matched),
+            truncated=len(matched) > limit,
+        )
 
     async def capture_items(self, items: list[CaptureItem]) -> CaptureResult:
         if not items:
