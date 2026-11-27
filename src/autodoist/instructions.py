@@ -10,8 +10,7 @@ def build_instructions(rules: RulesConfig) -> str:
     """
     slots = [routine.name for routine in rules.routines]
     lines = [
-        "autodoist manages a household's Todoist tasks. Use it for any task, chore, "
-        "errand, or reminder request.",
+        "autodoist manages a household's tasks in Todoist.",
         "",
         f"Projects: {', '.join(rules.allowed_projects)}. "
         f"New tasks may be created in: {', '.join(rules.capture_projects)}.",
