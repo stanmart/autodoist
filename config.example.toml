@@ -35,6 +35,11 @@ inbox_project = "Inbox"
 # IANA timezone used for overdue date comparisons (e.g. Europe/Budapest)
 timezone = "UTC"
 
+# What each project is for; sent to the MCP client in the server instructions
+[rules.project_descriptions]
+Personal = "My own tasks and admin"
+Household = "Anything shared: chores, consumables, errands, and maintenance"
+
 # What each label means; sent to the MCP client in the server instructions
 [rules.label_descriptions]
 errands = "Needs leaving the house"

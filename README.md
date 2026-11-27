@@ -13,7 +13,7 @@ A lean MCP server and mini-backend sitting between an MCP client (e.g. **Gemini*
 
 ## Server instructions
 
-The server sends MCP `instructions` generated from `[rules]`: the allowed projects, each label's meaning, and the routine slots. They cover vocabulary only. Procedures such as triage or a weekly review are specific to your workflow and belong in client-side skills or prompts, which can refer to the labels and slots the server lists instead of repeating them. For a client that ignores MCP instructions, print the same text and paste it into a Gem, skill, or system prompt:
+The server sends MCP `instructions` generated from `[rules]`: the allowed projects and labels with their meanings, and the routine slots. They cover vocabulary only. Procedures such as triage or a weekly review are specific to your workflow and belong in client-side skills or prompts, which can refer to the labels and slots the server lists instead of repeating them. For a client that ignores MCP instructions, print the same text and paste it into a Gem, skill, or system prompt:
 
 ```bash
 uv run python -m autodoist.instructions
@@ -28,7 +28,7 @@ Non-secret settings live in `config.toml` (copy from [config.example.toml](confi
 - `[sync]`: `interval_minutes` (default `30`; `0` disables background sync)
 - `[rules]`: `allowed_projects`, `capture_projects`, `allowed_labels`, `synergy_labels`, optional `review_label` and `someday_label`, `inbox_project` (default `Inbox`), `timezone` (default `UTC`)
 - `[[rules.routines]]`: recurring slots for working through tasks. `name` is also the label that assigns a task to the slot (so it must be in `allowed_labels`); optional `due_within_days` makes the slot also include any task due within that window. Optional `purpose` and `capacity` are free text for the assistant. The slot times live in your calendar, not here.
-- `[rules.label_descriptions]`: optional one-line meaning per label.
+- `[rules.project_descriptions]` and `[rules.label_descriptions]`: optional one-line meaning per project and per label.
 
 Projects are allowlisted by name. Todoist lets several projects share a name, so if an allowlisted name matches more than one active project, every tool call that reads or writes Todoist tasks in it is rejected until one of them is renamed. Background sync skips it meanwhile, so completions made in that period are not added to the history.
 
