@@ -23,9 +23,11 @@ interval_minutes = 30
 [rules]
 allowed_projects = ["Inbox", "Personal", "Household"]
 capture_projects = ["Personal", "Household"]
-allowed_labels = ["errands", "home", "admin", "15min", "review", "evening", "weekend", "someday"]
+allowed_labels = ["errands", "home", "admin", "15min", "evening", "weekend", "someday"]
 synergy_labels = ["errands", "home", "admin", "15min"]
-review_label = "review"
+# Optional: tag every task created through the MCP until a human confirms it. The label
+# must also be in allowed_labels. Leave unset to let the assistant work unattended.
+# review_label = "review"
 # Tasks with this label are hidden from get_tasks unless requested by label
 someday_label = "someday"
 # Project whose tasks always count as needing triage

@@ -5,7 +5,7 @@ A lean MCP server and mini-backend sitting between an MCP client (e.g. **Gemini*
 ## MCP Tools (6)
 
 - `get_tasks`: Fetch active tasks within allowed projects, sorted by priority/due date. Filters (combined with AND): `project`, `label`, `due` (`overdue`/`today`/`week`/`none`/`all`), `slot` (a routine), `needs_triage` (inbox or `review`-labelled), `older_than_days`. `group_by` is `label` (first matching synergy label), `project`, `due`, or `none`; `limit` defaults to 50 and the result reports `total` and `truncated`. Tasks carrying `someday_label` are hidden unless requested by `label`.
-- `capture_items`: Batch-create tasks (enforcing capture project allowlist, duplicate skipping, and mandatory `review` label) or log `post_hoc` completions directly to SQLite (with retry dedup).
+- `capture_items`: Batch-create tasks (enforcing capture project allowlist, duplicate skipping, and the `review_label` if one is configured) or log `post_hoc` completions directly to SQLite (with retry dedup).
 - `update_or_reschedule`: Rewrite a task's `content`/`notes`, update labels/priority/project, or change its schedule. `new_due_date` moves the date while preserving recurrence and the time of day; `due_string` replaces the whole schedule (e.g. `every 2 weeks on thu`, or `no date` to clear it). `review` is kept unless `clear_review_flag=true`. `labels` replaces only labels in `allowed_labels`; labels set by hand in Todoist are kept.
 - `complete_task`: Close an allowed task in Todoist and immediately log it in `completion_log`. Completing an already completed task is a no-op.
 - `drop_task`: Delete an allowed task that will not be done. A snapshot is kept in the `dropped_tasks` SQLite table, and nothing is added to the completion history. Tasks with subtasks are refused.
@@ -26,7 +26,7 @@ Non-secret settings live in `config.toml` (copy from [config.example.toml](confi
 - `[storage]`: `db_path` (default `data/autodoist.db`)
 - `[auth]`: `mcp_base_url`, `oidc_issuer`, optional `oidc_jwks_uri`, `jwt_algorithm` (default `RS256`), `jwt_audience` (required when `AUTH_DISABLED=false`), `allowed_user_subs`
 - `[sync]`: `interval_minutes` (default `30`; `0` disables background sync)
-- `[rules]`: `allowed_projects`, `capture_projects`, `allowed_labels`, `synergy_labels`, `review_label`, optional `someday_label`, `inbox_project` (default `Inbox`), `timezone` (default `UTC`)
+- `[rules]`: `allowed_projects`, `capture_projects`, `allowed_labels`, `synergy_labels`, optional `review_label` and `someday_label`, `inbox_project` (default `Inbox`), `timezone` (default `UTC`)
 - `[[rules.routines]]`: recurring slots for working through tasks. `name` is also the label that assigns a task to the slot (so it must be in `allowed_labels`); optional `due_within_days` makes the slot also include any task due within that window. Optional `purpose` and `capacity` are free text for the assistant. The slot times live in your calendar, not here.
 - `[rules.label_descriptions]`: optional one-line meaning per label.
 

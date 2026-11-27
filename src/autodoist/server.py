@@ -193,7 +193,7 @@ def create_server(
         ] = None,
         needs_triage: Annotated[
             bool,
-            Field(description="Only inbox tasks and tasks still carrying the review label."),
+            Field(description="Only inbox tasks, plus review-labelled ones if that is configured."),
         ] = False,
         older_than_days: Annotated[
             int | None,
@@ -220,7 +220,7 @@ def create_server(
 
     @mcp.tool(output_schema=None)
     async def capture_items(items: list[CaptureItem]) -> CaptureResult:
-        """Batch-create tasks, which always get the review label.
+        """Batch-create tasks; they get the review label if one is configured.
 
         Use mode='post_hoc' to log something already done that had no task.
         """

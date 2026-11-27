@@ -1315,3 +1315,62 @@ def test_server_instructions_describe_the_configured_vocabulary(tmp_path: Path) 
         RulesConfig.model_validate(
             {**cfg.rules.model_dump(), "label_descriptions": {"bogus": "x"}}
         )
+
+
+@respx.mock
+async def test_without_a_review_label_nothing_is_tagged_and_triage_is_the_inbox(
+    tmp_path: Path,
+) -> None:
+    _mock_projects([{"id": "p0", "name": "Inbox"}, {"id": "p1", "name": "Personal"}])
+    respx.get(f"{TODOIST_API_V1_BASE}/tasks").mock(
+        return_value=httpx.Response(
+            200,
+            json={
+                "results": [
+                    {"id": "t-inbox", "content": "diapers??", "project_id": "p0"},
+                    {"id": "t-filed", "content": "Pay invoice", "project_id": "p1"},
+                ],
+                "next_cursor": None,
+            },
+        )
+    )
+    sync_route = respx.post(f"{TODOIST_API_V1_BASE}/sync").mock(
+        side_effect=lambda req: httpx.Response(
+            200,
+            json={
+                "sync_status": {cmd["uuid"]: "ok" for cmd in _parse_sync_commands(req)},
+                "temp_id_mapping": {cmd["temp_id"]: "new-1" for cmd in _parse_sync_commands(req)},
+            },
+        )
+    )
+    cfg, env = _make_config(tmp_path)
+    cfg.rules = RulesConfig.model_validate(
+        {
+            **cfg.rules.model_dump(),
+            "allowed_labels": ["errands", "home"],
+            "synergy_labels": ["errands", "home"],
+            "review_label": None,
+        }
+    )
+    todoist = TodoistClient("test-token")
+    mcp = create_server(cfg, env, todoist=todoist)
+
+    try:
+        async with Client(mcp) as client:
+            await client.call_tool(
+                "capture_items",
+                {
+                    "items": [
+                        {"content": "Buy stamps", "project": "Personal", "labels": ["errands"]}
+                    ]
+                },
+            )
+            triage = await _call_json(
+                client, "get_tasks", {"needs_triage": True, "group_by": "none"}
+            )
+            assert [t["id"] for t in triage["groups"]["tasks"]] == ["t-inbox"]
+    finally:
+        await todoist.aclose()
+
+    created = _parse_sync_commands(sync_route.calls[0].request)[0]["args"]
+    assert created["labels"] == ["errands"]
