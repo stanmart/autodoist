@@ -1295,6 +1295,7 @@ def test_server_instructions_describe_the_configured_vocabulary(tmp_path: Path) 
             "allowed_labels": [*cfg.rules.allowed_labels, "evening", "someday"],
             "someday_label": "someday",
             "label_descriptions": {"errands": "Needs leaving the house"},
+            "project_descriptions": {"Personal": "My own tasks and admin"},
             "routines": [
                 {"name": "evening", "purpose": "Urgent tasks.", "capacity": "3 tasks"}
             ],
@@ -1306,8 +1307,10 @@ def test_server_instructions_describe_the_configured_vocabulary(tmp_path: Path) 
     # integrations in the same client keep working.
     assert instructions.startswith("autodoist manages a household's tasks in Todoist.\n")
     assert "Use it for" not in instructions
-    assert "Projects: Inbox, Personal, Household." in instructions
-    assert "New tasks may be created in: Personal, Household." in instructions
+    assert "Projects (new tasks may be created in: Personal, Household):" in instructions
+    assert "- Inbox: raw, hand-captured items that still need triage" in instructions
+    assert "- Personal: My own tasks and admin" in instructions
+    assert "- Household\n" in instructions
     assert "- errands: Needs leaving the house" in instructions
     assert "- evening: Urgent tasks. Capacity: 3 tasks" in instructions
     # Slot labels are listed once, under the slots.
@@ -1315,6 +1318,10 @@ def test_server_instructions_describe_the_configured_vocabulary(tmp_path: Path) 
     # Vocabulary only: procedures live in client-side skills.
     assert "Triage" not in instructions
 
+    with pytest.raises(ValueError, match="project_descriptions keys"):
+        RulesConfig.model_validate(
+            {**cfg.rules.model_dump(), "project_descriptions": {"WorkSecret": "x"}}
+        )
     with pytest.raises(ValueError, match="label_descriptions keys"):
         RulesConfig.model_validate(
             {**cfg.rules.model_dump(), "label_descriptions": {"bogus": "x"}}

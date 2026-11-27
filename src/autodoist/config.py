@@ -99,6 +99,7 @@ class RulesConfig(BaseModel):
     review_label: str | None = None
     someday_label: str | None = None
     label_descriptions: dict[str, str] = Field(default_factory=dict)
+    project_descriptions: dict[str, str] = Field(default_factory=dict)
     inbox_project: str = "Inbox"
     routines: list[RoutineConfig] = Field(default_factory=list)
     timezone: str = "UTC"
@@ -173,6 +174,13 @@ class RulesConfig(BaseModel):
         if unknown_described:
             raise ValueError(
                 f"label_descriptions keys must be in allowed_labels; invalid: {unknown_described}"
+            )
+
+        unknown_projects = sorted(set(self.project_descriptions) - allowed_proj_set)
+        if unknown_projects:
+            raise ValueError(
+                "project_descriptions keys must be in allowed_projects; "
+                f"invalid: {unknown_projects}"
             )
 
         routine_names = [routine.name for routine in self.routines]

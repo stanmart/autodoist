@@ -12,12 +12,14 @@ def build_instructions(rules: RulesConfig) -> str:
     lines = [
         "autodoist manages a household's tasks in Todoist.",
         "",
-        f"Projects: {', '.join(rules.allowed_projects)}. "
-        f"New tasks may be created in: {', '.join(rules.capture_projects)}.",
-        f"{rules.inbox_project} holds raw, hand-captured items that still need triage.",
-        "",
-        "Labels (the only ones you may set):",
+        f"Projects (new tasks may be created in: {', '.join(rules.capture_projects)}):",
     ]
+    for project in rules.allowed_projects:
+        description = rules.project_descriptions.get(project)
+        if description is None and project == rules.inbox_project:
+            description = "raw, hand-captured items that still need triage"
+        lines.append(f"- {project}: {description}" if description else f"- {project}")
+    lines += ["", "Labels (the only ones you may set):"]
     for label in rules.allowed_labels:
         if label in slots:
             continue
