@@ -94,7 +94,7 @@ async def test_only_the_safe_tools_are_registered(tmp_path: Path) -> None:
         tools = await client.list_tools()
     names = {tool.name for tool in tools}
     assert names == {
-        "get_tasks_by_synergy",
+        "get_tasks",
         "capture_items",
         "update_or_reschedule",
         "complete_task",
@@ -346,7 +346,7 @@ async def test_synergy_and_reschedule_guardrails(tmp_path: Path) -> None:
 
     try:
         async with Client(mcp) as client:
-            synergy = await _call_json(client, "get_tasks_by_synergy", {})
+            synergy = (await _call_json(client, "get_tasks", {}))["groups"]
             assert [t["id"] for t in synergy["15min"]] == ["t1"]
             # Todoist API priority 2 maps to app priority 3 (p3)
             assert synergy["15min"][0]["priority"] == 3
@@ -689,7 +689,9 @@ async def test_synergy_sorting_overdue_filtering_and_error_cases(tmp_path: Path)
 
     try:
         async with Client(mcp) as client:
-            all_tasks = await _call_json(client, "get_tasks_by_synergy", {})
+            listing = await _call_json(client, "get_tasks", {})
+            assert (listing["total"], listing["truncated"]) == (5, False)
+            all_tasks = listing["groups"]
             assert [t["id"] for t in all_tasks["admin"]] == [
                 "t-p1-earlier",
                 "t-p1-soon",
@@ -700,15 +702,35 @@ async def test_synergy_sorting_overdue_filtering_and_error_cases(tmp_path: Path)
             assert [t["id"] for t in all_tasks["untagged"]] == ["t-untagged"]
             assert all_tasks["untagged"][0]["priority"] == 4
 
-            no_overdue = await _call_json(
-                client, "get_tasks_by_synergy", {"include_overdue": False}
-            )
-            assert "t-overdue" not in [t["id"] for t in no_overdue["admin"]]
+            async def ids(args: dict[str, Any]) -> list[str]:
+                res = await _call_json(client, "get_tasks", {"group_by": "none", **args})
+                return [t["id"] for t in res["groups"].get("tasks", [])]
+
+            assert await ids({"due": "overdue"}) == ["t-overdue"]
+            assert await ids({"due": "today"}) == ["t-overdue"]
+            assert await ids({"due": "week"}) == [
+                "t-p1-earlier",
+                "t-p1-soon",
+                "t-overdue",
+                "t-p4-later",
+            ]
+            assert await ids({"due": "none"}) == ["t-untagged"]
+
+            by_due = (await _call_json(client, "get_tasks", {"group_by": "due"}))["groups"]
+            assert {k: [t["id"] for t in v] for k, v in by_due.items()} == {
+                "this_week": ["t-p1-earlier", "t-p1-soon", "t-p4-later"],
+                "overdue": ["t-overdue"],
+                "no_date": ["t-untagged"],
+            }
+
+            capped = await _call_json(client, "get_tasks", {"limit": 2, "group_by": "none"})
+            assert [t["id"] for t in capped["groups"]["tasks"]] == ["t-p1-earlier", "t-p1-soon"]
+            assert (capped["total"], capped["truncated"]) == (5, True)
 
             with pytest.raises(ToolError, match="not allowed"):
-                await client.call_tool("get_tasks_by_synergy", {"project": "WorkSecret"})
+                await client.call_tool("get_tasks", {"project": "WorkSecret"})
             with pytest.raises(ToolError, match="Unsupported labels"):
-                await client.call_tool("get_tasks_by_synergy", {"label": "bogus"})
+                await client.call_tool("get_tasks", {"label": "bogus"})
     finally:
         await todoist.aclose()
 
@@ -881,7 +903,7 @@ async def test_duplicate_project_names_fail_closed(tmp_path: Path) -> None:
                         "update_or_reschedule", {"task_id": task_id, "priority": 1}
                     )
             with pytest.raises(ToolError, match=ambiguous):
-                await client.call_tool("get_tasks_by_synergy", {"project": "Personal"})
+                await client.call_tool("get_tasks", {"project": "Personal"})
             with pytest.raises(ToolError, match=ambiguous):
                 await client.call_tool(
                     "capture_items",
@@ -893,7 +915,7 @@ async def test_duplicate_project_names_fail_closed(tmp_path: Path) -> None:
                 )
 
             # Uniquely named projects keep working.
-            listed = await _call_json(client, "get_tasks_by_synergy", {})
+            listed = (await _call_json(client, "get_tasks", {}))["groups"]
             assert [t["id"] for t in listed["untagged"]] == ["t-house"]
             done = await _call_json(client, "complete_task", {"task_id": "t-house"})
             assert done["project"] == "Household"
@@ -927,7 +949,7 @@ async def test_listing_fails_closed_when_a_task_is_in_an_ambiguous_project(
     try:
         async with Client(mcp) as client:
             with pytest.raises(ToolError, match="shared by several Todoist projects"):
-                await client.call_tool("get_tasks_by_synergy", {})
+                await client.call_tool("get_tasks", {})
     finally:
         await todoist.aclose()
 
@@ -1170,3 +1192,117 @@ async def test_drop_task_keeps_no_snapshot_when_the_delete_fails(tmp_path: Path)
 
     with sqlite3.connect(cfg.storage.db_path) as conn:
         assert conn.execute("SELECT COUNT(*) FROM dropped_tasks").fetchone() == (0,)
+
+
+@respx.mock
+async def test_get_tasks_slot_triage_someday_and_stale_filters(tmp_path: Path) -> None:
+    now = datetime.now(UTC)
+    today = now.date()
+
+    def due_in(days: int) -> dict[str, str]:
+        return {"date": (today + timedelta(days=days)).isoformat()}
+
+    _mock_projects([{"id": "p0", "name": "Inbox"}, {"id": "p1", "name": "Personal"}])
+    tasks: list[dict[str, Any]] = [
+        {"id": "t-inbox", "content": "diapers??", "project_id": "p0"},
+        {
+            "id": "t-review",
+            "content": "Call plumber",
+            "project_id": "p1",
+            "labels": ["review", "weekend"],
+        },
+        {
+            "id": "t-evening",
+            "content": "Pay invoice",
+            "description": "IBAN is in the mail",
+            "project_id": "p1",
+            "labels": ["evening"],
+            "added_at": (now - timedelta(days=40, hours=1)).isoformat(),
+        },
+        {
+            "id": "t-deadline",
+            "content": "Return parcel",
+            "project_id": "p1",
+            "labels": ["weekend"],
+            "due": due_in(1),
+        },
+        {
+            "id": "t-later",
+            "content": "Renew passport",
+            "project_id": "p1",
+            "due": due_in(5),
+        },
+        {
+            "id": "t-someday",
+            "content": "Learn the ukulele",
+            "project_id": "p1",
+            "labels": ["someday"],
+        },
+    ]
+
+    def _list_tasks(req: httpx.Request) -> httpx.Response:
+        # Todoist applies the label filter server-side.
+        label = req.url.params.get("label")
+        results = [t for t in tasks if label is None or label in t.get("labels", [])]
+        return httpx.Response(200, json={"results": results, "next_cursor": None})
+
+    respx.get(f"{TODOIST_API_V1_BASE}/tasks").mock(side_effect=_list_tasks)
+    cfg, env = _make_config(tmp_path)
+    cfg.rules = RulesConfig.model_validate(
+        {
+            **cfg.rules.model_dump(),
+            "allowed_labels": [*cfg.rules.allowed_labels, "evening", "weekend", "someday"],
+            "someday_label": "someday",
+            "routines": [{"name": "evening", "due_within_days": 1}, {"name": "weekend"}],
+        }
+    )
+    todoist = TodoistClient("test-token")
+    mcp = create_server(cfg, env, todoist=todoist)
+
+    try:
+        async with Client(mcp) as client:
+
+            async def ids(args: dict[str, Any]) -> set[str]:
+                res = await _call_json(client, "get_tasks", {"group_by": "none", **args})
+                return {t["id"] for t in res["groups"].get("tasks", [])}
+
+            # Someday tasks only show up when asked for by label.
+            assert "t-someday" not in await ids({})
+            assert await ids({"label": "someday"}) == {"t-someday"}
+
+            # A slot is its label plus anything due within its window, whatever the label.
+            assert await ids({"slot": "evening"}) == {"t-evening", "t-deadline"}
+            assert await ids({"slot": "weekend"}) == {"t-review", "t-deadline"}
+            with pytest.raises(ToolError, match="Unknown slot"):
+                await client.call_tool("get_tasks", {"slot": "lunch"})
+
+            assert await ids({"needs_triage": True}) == {"t-inbox", "t-review"}
+            assert await ids({"older_than_days": 30}) == {"t-evening"}
+
+            by_project = (
+                await _call_json(client, "get_tasks", {"group_by": "project"})
+            )["groups"]
+            assert [t["id"] for t in by_project["Inbox"]] == ["t-inbox"]
+            evening = next(t for t in by_project["Personal"] if t["id"] == "t-evening")
+            assert evening["notes"] == "IBAN is in the mail"
+            assert evening["age_days"] == 40
+    finally:
+        await todoist.aclose()
+
+
+def test_routines_and_someday_label_must_use_allowed_labels() -> None:
+    base: dict[str, Any] = {
+        "allowed_projects": ["Personal"],
+        "capture_projects": ["Personal"],
+        "allowed_labels": ["review", "evening"],
+        "review_label": "review",
+    }
+    RulesConfig.model_validate({**base, "routines": [{"name": "evening"}]})
+    with pytest.raises(ValueError, match="must be present in allowed_labels"):
+        RulesConfig.model_validate({**base, "routines": [{"name": "weekend"}]})
+    with pytest.raises(ValueError, match="routine names must be unique"):
+        RulesConfig.model_validate(
+            {**base, "routines": [{"name": "evening"}, {"name": "evening"}]}
+        )
+    with pytest.raises(ValueError, match="someday_label"):
+        RulesConfig.model_validate({**base, "someday_label": "someday"})

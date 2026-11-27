@@ -56,6 +56,7 @@ class TodoistTask(BaseModel):
     due: TodoistDue | None = None
     checked: bool = False
     is_deleted: bool = False
+    added_at: str | None = None
     completed_at: str | None = None
 
     @field_validator("id", "project_id", mode="before")
@@ -161,6 +162,14 @@ class TaskOut(BaseModel):
     )
     due_date: str | None = None
     is_recurring: bool = False
+    notes: str | None = None
+    age_days: int | None = Field(default=None, description="Days since the task was created.")
+
+
+class TaskList(BaseModel):
+    groups: dict[str, list[TaskOut]]
+    total: int = Field(description="Tasks matching the filters, before `limit` was applied.")
+    truncated: bool
 
 
 class CreatedTaskOut(BaseModel):

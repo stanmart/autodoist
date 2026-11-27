@@ -23,8 +23,22 @@ interval_minutes = 30
 [rules]
 allowed_projects = ["Inbox", "Personal", "Household"]
 capture_projects = ["Personal", "Household"]
-allowed_labels = ["errands", "home", "admin", "15min", "review"]
+allowed_labels = ["errands", "home", "admin", "15min", "review", "evening", "weekend", "someday"]
 synergy_labels = ["errands", "home", "admin", "15min"]
 review_label = "review"
+# Tasks with this label are hidden from get_tasks unless requested by label
+someday_label = "someday"
+# Project whose tasks always count as needing triage
+inbox_project = "Inbox"
 # IANA timezone used for overdue date comparisons (e.g. Europe/Budapest)
 timezone = "UTC"
+
+# Routine slots: recurring times for working through tasks. The name is also the label
+# that assigns a task to the slot; the times themselves live in your calendar.
+[[rules.routines]]
+name = "evening"
+# Also pull in any task due within this many days, whatever its label
+due_within_days = 1
+
+[[rules.routines]]
+name = "weekend"
