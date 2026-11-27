@@ -1302,6 +1302,10 @@ def test_server_instructions_describe_the_configured_vocabulary(tmp_path: Path) 
     )
     instructions = create_server(cfg, env).instructions
     assert instructions is not None
+    # It describes itself without claiming every task request, so that other task
+    # integrations in the same client keep working.
+    assert instructions.startswith("autodoist manages a household's tasks in Todoist.\n")
+    assert "Use it for" not in instructions
     assert "Projects: Inbox, Personal, Household." in instructions
     assert "New tasks may be created in: Personal, Household." in instructions
     assert "- errands: Needs leaving the house" in instructions
