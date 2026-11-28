@@ -1,3 +1,5 @@
+<img src="src/autodoist/assets/icon.png" alt="autodoist icon" width="72" />
+
 # autodoist
 
 A lean MCP server and mini-backend sitting between an MCP client (e.g. **Gemini**) and **Todoist** (API v1), with code-enforced guardrails, OIDC / OAuth 2.1 (`RemoteAuthProvider` + `JWTVerifier`), and SQLite completion history.

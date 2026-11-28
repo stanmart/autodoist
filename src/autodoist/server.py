@@ -1,8 +1,11 @@
 from __future__ import annotations
 
 import asyncio
+import base64
 import logging
 from contextlib import asynccontextmanager, suppress
+from functools import lru_cache
+from importlib import resources
 from typing import Annotated, Any
 
 import uvicorn
@@ -11,10 +14,11 @@ from fastmcp.server.auth import RemoteAuthProvider
 from fastmcp.server.auth.providers.jwt import JWTVerifier
 from fastmcp.server.dependencies import get_access_token
 from mcp.server.auth.middleware.bearer_auth import AuthenticatedUser
+from mcp.types import Icon
 from pydantic import AnyHttpUrl, Field, TypeAdapter, UrlConstraints
 from starlette.middleware import Middleware
 from starlette.requests import Request
-from starlette.responses import JSONResponse
+from starlette.responses import JSONResponse, Response
 from starlette.types import ASGIApp, Receive, Scope, Send
 
 from autodoist.config import (
@@ -115,6 +119,25 @@ def build_http_middleware(app_config: AppConfig, env: EnvSettings) -> list[Middl
     ]
 
 
+_ICON_CACHE_HEADERS = {"Cache-Control": "public, max-age=86400"}
+
+
+@lru_cache(maxsize=4)
+def _load_asset(filename: str) -> bytes:
+    return resources.files("autodoist").joinpath("assets", filename).read_bytes()
+
+
+def _build_server_icons(app_config: AppConfig) -> list[Icon]:
+    # MCP icon URIs must use https: (same-origin, fetched without credentials) or data:.
+    base_url = app_config.auth.mcp_base_url
+    if base_url.startswith("https://"):
+        icon_src = f"{base_url}/icon.png"
+    else:
+        encoded = base64.b64encode(_load_asset("icon.png")).decode("ascii")
+        icon_src = f"data:image/png;base64,{encoded}"
+    return [Icon(src=icon_src, mime_type="image/png", sizes=["128x128"])]
+
+
 def create_server(
     app_config: AppConfig,
     env: EnvSettings,
@@ -166,6 +189,7 @@ def create_server(
     mcp = FastMCP(
         name="autodoist",
         instructions=build_instructions(app_config.rules),
+        icons=_build_server_icons(app_config),
         auth=build_auth_provider(app_config, env, token_verifier=token_verifier),
         lifespan=_lifespan,
     )
@@ -178,6 +202,22 @@ def create_server(
             logger.exception("Health check failed")
             return JSONResponse({"status": "unhealthy"}, status_code=503)
         return JSONResponse({"status": "ok"})
+
+    @mcp.custom_route("/icon.png", methods=["GET", "HEAD"])
+    async def icon_png(_request: Request) -> Response:
+        return Response(
+            content=_load_asset("icon.png"),
+            media_type="image/png",
+            headers=_ICON_CACHE_HEADERS,
+        )
+
+    @mcp.custom_route("/favicon.ico", methods=["GET", "HEAD"])
+    async def favicon_ico(_request: Request) -> Response:
+        return Response(
+            content=_load_asset("favicon.ico"),
+            media_type="image/x-icon",
+            headers=_ICON_CACHE_HEADERS,
+        )
 
     @mcp.tool(output_schema=None)
     async def get_tasks(
