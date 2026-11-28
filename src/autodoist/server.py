@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import logging
 from contextlib import asynccontextmanager, suppress
+from importlib import resources
 from typing import Annotated, Any
 
 import uvicorn
@@ -11,10 +12,11 @@ from fastmcp.server.auth import RemoteAuthProvider
 from fastmcp.server.auth.providers.jwt import JWTVerifier
 from fastmcp.server.dependencies import get_access_token
 from mcp.server.auth.middleware.bearer_auth import AuthenticatedUser
+from mcp.types import Icon
 from pydantic import AnyHttpUrl, Field, TypeAdapter, UrlConstraints
 from starlette.middleware import Middleware
 from starlette.requests import Request
-from starlette.responses import JSONResponse
+from starlette.responses import JSONResponse, Response
 from starlette.types import ASGIApp, Receive, Scope, Send
 
 from autodoist.config import (
@@ -115,6 +117,11 @@ def build_http_middleware(app_config: AppConfig, env: EnvSettings) -> list[Middl
     ]
 
 
+_ASSETS = resources.files("autodoist").joinpath("assets")
+_ICON_PNG = _ASSETS.joinpath("icon.png").read_bytes()
+_FAVICON_ICO = _ASSETS.joinpath("favicon.ico").read_bytes()
+
+
 def create_server(
     app_config: AppConfig,
     env: EnvSettings,
@@ -161,11 +168,19 @@ def create_server(
                 if owns_todoist:
                     await todoist_client.aclose()
 
+    base_url = app_config.auth.mcp_base_url
+    icons = (
+        [Icon(src=f"{base_url}/icon.png", mime_type="image/png", sizes=["128x128"])]
+        if base_url.startswith("https://")
+        else None
+    )
+
     # Tools opt out of advertising an output schema: it costs context in clients that
     # forward it, and the JSON results describe themselves.
     mcp = FastMCP(
         name="autodoist",
         instructions=build_instructions(app_config.rules),
+        icons=icons,
         auth=build_auth_provider(app_config, env, token_verifier=token_verifier),
         lifespan=_lifespan,
     )
@@ -178,6 +193,14 @@ def create_server(
             logger.exception("Health check failed")
             return JSONResponse({"status": "unhealthy"}, status_code=503)
         return JSONResponse({"status": "ok"})
+
+    @mcp.custom_route("/icon.png", methods=["GET", "HEAD"])
+    async def icon_png(_request: Request) -> Response:
+        return Response(_ICON_PNG, media_type="image/png")
+
+    @mcp.custom_route("/favicon.ico", methods=["GET", "HEAD"])
+    async def favicon_ico(_request: Request) -> Response:
+        return Response(_FAVICON_ICO, media_type="image/x-icon")
 
     @mcp.tool(output_schema=None)
     async def get_tasks(

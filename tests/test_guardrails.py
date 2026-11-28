@@ -507,6 +507,8 @@ def test_http_jwt_authz_discovery_and_removed_internal_sync(tmp_path: Path) -> N
 
     with TestClient(app) as client:
         assert client.get("/health").status_code == 200
+        assert client.get("/icon.png").headers["content-type"] == "image/png"
+        assert client.get("/favicon.ico").headers["content-type"] == "image/x-icon"
 
         prm = client.get("/.well-known/oauth-protected-resource/mcp")
         assert prm.status_code == 200
@@ -544,7 +546,15 @@ def test_http_jwt_authz_discovery_and_removed_internal_sync(tmp_path: Path) -> N
         )
         assert resp_ok.status_code == 200
         assert resp_ok.headers["content-type"].startswith("application/json")
-        assert resp_ok.json()["result"]["serverInfo"]["name"] == "autodoist"
+        server_info = resp_ok.json()["result"]["serverInfo"]
+        assert server_info["name"] == "autodoist"
+        assert server_info["icons"] == [
+            {
+                "src": "https://mcp.example.com/icon.png",
+                "mimeType": "image/png",
+                "sizes": ["128x128"],
+            }
+        ]
 
         assert client.post("/internal/sync").status_code == 404
 
