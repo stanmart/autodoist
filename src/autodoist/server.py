@@ -1,10 +1,8 @@
 from __future__ import annotations
 
 import asyncio
-import base64
 import logging
 from contextlib import asynccontextmanager, suppress
-from functools import lru_cache
 from importlib import resources
 from typing import Annotated, Any
 
@@ -119,23 +117,9 @@ def build_http_middleware(app_config: AppConfig, env: EnvSettings) -> list[Middl
     ]
 
 
-_ICON_CACHE_HEADERS = {"Cache-Control": "public, max-age=86400"}
-
-
-@lru_cache(maxsize=4)
-def _load_asset(filename: str) -> bytes:
-    return resources.files("autodoist").joinpath("assets", filename).read_bytes()
-
-
-def _build_server_icons(app_config: AppConfig) -> list[Icon]:
-    # MCP icon URIs must use https: (same-origin, fetched without credentials) or data:.
-    base_url = app_config.auth.mcp_base_url
-    if base_url.startswith("https://"):
-        icon_src = f"{base_url}/icon.png"
-    else:
-        encoded = base64.b64encode(_load_asset("icon.png")).decode("ascii")
-        icon_src = f"data:image/png;base64,{encoded}"
-    return [Icon(src=icon_src, mime_type="image/png", sizes=["128x128"])]
+_ASSETS = resources.files("autodoist").joinpath("assets")
+_ICON_PNG = _ASSETS.joinpath("icon.png").read_bytes()
+_FAVICON_ICO = _ASSETS.joinpath("favicon.ico").read_bytes()
 
 
 def create_server(
@@ -184,12 +168,19 @@ def create_server(
                 if owns_todoist:
                     await todoist_client.aclose()
 
+    base_url = app_config.auth.mcp_base_url
+    icons = (
+        [Icon(src=f"{base_url}/icon.png", mime_type="image/png", sizes=["128x128"])]
+        if base_url.startswith("https://")
+        else None
+    )
+
     # Tools opt out of advertising an output schema: it costs context in clients that
     # forward it, and the JSON results describe themselves.
     mcp = FastMCP(
         name="autodoist",
         instructions=build_instructions(app_config.rules),
-        icons=_build_server_icons(app_config),
+        icons=icons,
         auth=build_auth_provider(app_config, env, token_verifier=token_verifier),
         lifespan=_lifespan,
     )
@@ -205,19 +196,11 @@ def create_server(
 
     @mcp.custom_route("/icon.png", methods=["GET", "HEAD"])
     async def icon_png(_request: Request) -> Response:
-        return Response(
-            content=_load_asset("icon.png"),
-            media_type="image/png",
-            headers=_ICON_CACHE_HEADERS,
-        )
+        return Response(_ICON_PNG, media_type="image/png")
 
     @mcp.custom_route("/favicon.ico", methods=["GET", "HEAD"])
     async def favicon_ico(_request: Request) -> Response:
-        return Response(
-            content=_load_asset("favicon.ico"),
-            media_type="image/x-icon",
-            headers=_ICON_CACHE_HEADERS,
-        )
+        return Response(_FAVICON_ICO, media_type="image/x-icon")
 
     @mcp.tool(output_schema=None)
     async def get_tasks(

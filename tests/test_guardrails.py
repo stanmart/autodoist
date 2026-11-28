@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import base64
 import json
 import sqlite3
 import time
@@ -508,6 +507,8 @@ def test_http_jwt_authz_discovery_and_removed_internal_sync(tmp_path: Path) -> N
 
     with TestClient(app) as client:
         assert client.get("/health").status_code == 200
+        assert client.get("/icon.png").headers["content-type"] == "image/png"
+        assert client.get("/favicon.ico").headers["content-type"] == "image/x-icon"
 
         prm = client.get("/.well-known/oauth-protected-resource/mcp")
         assert prm.status_code == 200
@@ -545,7 +546,15 @@ def test_http_jwt_authz_discovery_and_removed_internal_sync(tmp_path: Path) -> N
         )
         assert resp_ok.status_code == 200
         assert resp_ok.headers["content-type"].startswith("application/json")
-        assert resp_ok.json()["result"]["serverInfo"]["name"] == "autodoist"
+        server_info = resp_ok.json()["result"]["serverInfo"]
+        assert server_info["name"] == "autodoist"
+        assert server_info["icons"] == [
+            {
+                "src": "https://mcp.example.com/icon.png",
+                "mimeType": "image/png",
+                "sizes": ["128x128"],
+            }
+        ]
 
         assert client.post("/internal/sync").status_code == 404
 
@@ -1386,109 +1395,3 @@ async def test_without_a_review_label_nothing_is_tagged_and_triage_is_the_inbox(
 
     created = _parse_sync_commands(sync_route.calls[0].request)[0]["args"]
     assert created["labels"] == ["errands"]
-
-
-def test_server_icon_metadata_and_public_icon_routes(tmp_path: Path) -> None:
-    private_key, public_pem = _generate_rsa_keypair()
-    cfg, env = _make_config(tmp_path, auth_disabled=False)
-    verifier = JWTVerifier(
-        public_key=public_pem,
-        issuer="https://id.example.com",
-        audience="https://mcp.example.com",
-        algorithm="RS256",
-    )
-    mcp = create_server(cfg, env, token_verifier=verifier)
-    app = mcp.http_app(
-        transport="streamable-http",
-        stateless_http=True,
-        json_response=True,
-        middleware=build_http_middleware(cfg, env),
-    )
-
-    now = int(time.time())
-    allowed_jwt = jwt.encode(
-        {
-            "sub": "sub-allowed",
-            "iss": "https://id.example.com",
-            "aud": "https://mcp.example.com",
-            "iat": now,
-            "exp": now + 300,
-        },
-        private_key,
-        algorithm="RS256",
-    )
-
-    with TestClient(app) as client:
-        # Public icon routes must work without credentials even when OIDC auth is enabled.
-        png_resp = client.get("/icon.png")
-        assert png_resp.status_code == 200
-        assert png_resp.headers["content-type"] == "image/png"
-        assert "public" in png_resp.headers["cache-control"]
-        assert png_resp.content.startswith(b"\x89PNG\r\n\x1a\n")
-        assert client.head("/icon.png").status_code == 200
-
-        ico_resp = client.get("/favicon.ico")
-        assert ico_resp.status_code == 200
-        assert ico_resp.headers["content-type"] == "image/x-icon"
-        assert "public" in ico_resp.headers["cache-control"]
-        assert ico_resp.content.startswith(b"\x00\x00\x01\x00")
-        assert client.head("/favicon.ico").status_code == 200
-
-        init_resp = client.post(
-            "/mcp",
-            headers={
-                "Authorization": f"Bearer {allowed_jwt}",
-                "Accept": "application/json, text/event-stream",
-            },
-            json={
-                "jsonrpc": "2.0",
-                "id": 1,
-                "method": "initialize",
-                "params": {
-                    "protocolVersion": "2025-11-25",
-                    "capabilities": {},
-                    "clientInfo": {"name": "test", "version": "1.0"},
-                },
-            },
-        )
-        assert init_resp.status_code == 200
-        assert init_resp.json()["result"]["serverInfo"]["icons"] == [
-            {
-                "src": "https://mcp.example.com/icon.png",
-                "mimeType": "image/png",
-                "sizes": ["128x128"],
-            }
-        ]
-
-    # Without an HTTPS mcp_base_url (e.g. local dev), fall back to an embedded PNG data URI.
-    local_cfg, local_env = _make_config(tmp_path / "local", auth_disabled=True)
-    local_cfg.auth.mcp_base_url = ""
-    local_mcp = create_server(local_cfg, local_env)
-    local_app = local_mcp.http_app(
-        transport="streamable-http",
-        stateless_http=True,
-        json_response=True,
-    )
-    with TestClient(local_app) as client:
-        init_resp = client.post(
-            "/mcp",
-            headers={"Accept": "application/json, text/event-stream"},
-            json={
-                "jsonrpc": "2.0",
-                "id": 1,
-                "method": "initialize",
-                "params": {
-                    "protocolVersion": "2025-11-25",
-                    "capabilities": {},
-                    "clientInfo": {"name": "test", "version": "1.0"},
-                },
-            },
-        )
-        assert init_resp.status_code == 200
-        icons = init_resp.json()["result"]["serverInfo"]["icons"]
-        assert len(icons) == 1
-        assert icons[0]["mimeType"] == "image/png"
-        assert icons[0]["sizes"] == ["128x128"]
-        prefix = "data:image/png;base64,"
-        assert icons[0]["src"].startswith(prefix)
-        assert base64.b64decode(icons[0]["src"].removeprefix(prefix)) == png_resp.content
